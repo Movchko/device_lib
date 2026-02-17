@@ -6,7 +6,7 @@
 #include <string.h>
 #include <math.h>
 
-#define VDEVICE_CFG_SIZE 0x100
+#define VDEVICE_CFG_SIZE 64 // байт
 
 #define DEVICE_PPKY_TYPE 10
 #define DEVICE_IGNITER_TYPE 11

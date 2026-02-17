@@ -5,7 +5,8 @@
 #include "device.hpp"
 #include "backend.h"
 //PPKY
-#define PPKY_CONFIG_SIZE 0x5000 // 20kB
+//#define PPKY_CONFIG_SIZE 0x100000 // 1мб &!&!&!&!&!!&
+
 #define ZONE_NAME_SIZE	64 // 64 символа на имя зоны
 #define ZONE_NUMBER		100 // количество зон
 
@@ -18,13 +19,25 @@ typedef struct {
 	uint16_t size;    // размер полезной части (PPKYCfg) в байтах
 } PPKYConfigHeader;
 
+
+struct MKUCfg {
+
+	UniqId	UId;
+	VDeviceCfg	Devices[16];
+
+    /* . резерв нужен чтобы бесшовно обновлять устройство с имзенением структуры,
+     * при этом резерв уменьшать на кол-во давленных новых данных
+     */
+    uint8_t reserv[1]; // TODO:: PPKY_CONFIG_SIZE - все переменные
+};
+
 struct PPKYCfg {
 
 	UniqId	UId;
 
 	uint8_t beep; //
 
-
+	MKUCfg	CfgDevices[32];
 
 	int8_t zone_name[ZONE_NUMBER][ZONE_NAME_SIZE]; //
     /* . резерв нужен чтобы бесшовно обновлять устройство с имзенением структуры,
@@ -101,5 +114,8 @@ struct DeviceIgniterConfig {
 	/* резерв для выравнивания под VDeviceCfg::reserv (0x100 байт) */
 	uint8_t reserved[VDEVICE_CFG_SIZE - 3];
 };
+
+
+
 
 #endif /* INCLUDE_DEVICE_CONFIG_H_ */

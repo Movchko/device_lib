@@ -20,24 +20,47 @@ tBufMsgObject BufSendMsgObj[NumSendMsgObj];
 uint8_t       IndexSendMsgObj = 0;
 uint8_t       IndexSaveMsgObj = 0;
 
+/* Счётчик отброшенных сообщений при переполнении очереди (для диагностики) */
+static uint32_t SendOverflowCount = 0;
+
 uint8_t USBSndBuf[CDCPKTLEN] = {CDCPRE1, CDCPRE2};
 
 uint8_t CanStopSend = 0;
+
+/* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
+__attribute__((weak)) void CanSendOverError(void) { (void)0; }
+
+uint32_t BackendGetSendOverflowCount(void) {
+	return SendOverflowCount;
+}
 
 uint8_t *SavedCfgptr; // указатель на сохранённый массив конфигурации
 uint8_t *LocalCfgptr; // указатель на локальный (временный) массив конфигурации
 
 void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now) {
-    BufSendMsgObj[IndexSaveMsgObj].ui32MsgID = can_id.ID;
-    memcpy(&BufSendMsgObj[IndexSaveMsgObj].pui8MsgData, Data, 8);
-    if(Now)
-    	CANSendData((uint8_t *)&BufSendMsgObj[IndexSaveMsgObj]);
-    else {
-		IndexSaveMsgObj++;
-		if(IndexSaveMsgObj >= NumSendMsgObj)
-			IndexSaveMsgObj = 0;
-    }
-    //TODO: overflow CanSendOverError();
+    if (Now) {
+		/* Отправка мимо очереди: пишем в текущий слот и сразу шлём */
+		BufSendMsgObj[IndexSaveMsgObj].ui32MsgID = can_id.ID;
+		memcpy(&BufSendMsgObj[IndexSaveMsgObj].pui8MsgData, Data, 8);
+		CANSendData((uint8_t *)&BufSendMsgObj[IndexSaveMsgObj]);
+		return;
+	}
+
+	/* При переполнении сдвигаем голову очереди — затираем старые пакеты новыми */
+	uint8_t next_save = IndexSaveMsgObj + 1;
+	if (next_save >= NumSendMsgObj)
+		next_save = 0;
+	if (next_save == IndexSendMsgObj) {
+		SendOverflowCount++;
+		CanSendOverError();
+		IndexSendMsgObj++;
+		if (IndexSendMsgObj >= NumSendMsgObj)
+			IndexSendMsgObj = 0;
+	}
+
+	BufSendMsgObj[IndexSaveMsgObj].ui32MsgID = can_id.ID;
+	memcpy(&BufSendMsgObj[IndexSaveMsgObj].pui8MsgData, Data, 8);
+	IndexSaveMsgObj = next_save;
 }
 
 void BackendProcess() {
@@ -49,14 +72,11 @@ void BackendProcess() {
     	if(CanStopSend == 1)
     		return;
 
-		if(IndexSaveMsgObj != IndexSendMsgObj) {
-			uint32_t ID;
-			memcpy(&ID, &BufSendMsgObj[IndexSendMsgObj], 4);
-			uint8_t index = IndexSendMsgObj;
-			CANSendData((uint8_t *)&BufSendMsgObj[index]);
+		if (IndexSaveMsgObj != IndexSendMsgObj) {
+			CANSendData((uint8_t *)&BufSendMsgObj[IndexSendMsgObj]);
 
 			IndexSendMsgObj++;
-			if(IndexSendMsgObj >= NumSendMsgObj)
+			if (IndexSendMsgObj >= NumSendMsgObj)
 				IndexSendMsgObj = 0;
 		}
     }

@@ -84,6 +84,11 @@ void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr);
 // описать в главной программе
 void CANSendData(uint8_t *Buf);
 void USBSendData(uint8_t *Buf);
+
+/* Вызывается при переполнении очереди отправки; можно переопределить в приложении */
+void CanSendOverError(void);
+/* Количество отброшенных сообщений из-за переполнения (сброс — в приложении при необходимости) */
+uint32_t BackendGetSendOverflowCount(void);
 void CommandCB(uint8_t Dev, uint8_t Command, uint8_t *Parameters);
 void ListenerCommandCB(uint32_t MsgID, uint8_t *MsgData);
 uint32_t GetID();
