@@ -16,10 +16,15 @@ VDeviceIgniter::VDeviceIgniter(uint8_t ChNum) : VDevice(ChNum) {
 }
 
 void VDeviceIgniter::Init() {
-	/* Привязка конфигурации к общему буферу VDeviceCfg::reserv */
+	/* Привязка конфигурации к общему буферу VDeviceCfg::reserv (как в VDeviceDPT) */
 	if (CfgPtr != nullptr) {
-		memcpy(Config, CfgPtr, sizeof(DeviceIgniterConfig));
-		//Config = reinterpret_cast<DeviceIgniterConfig*>(CfgPtr->reserv);
+		Config = reinterpret_cast<DeviceIgniterConfig*>(CfgPtr->reserv);
+
+		/* Если конфиг "пустой" – устанавливаем значения по умолчанию */
+		if (Config->start_duration_ms == 0) {
+			Config->disable_sc_check  = 0;
+			Config->start_duration_ms = 1000;
+		}
 	} else {
 		Config = nullptr;
 	}

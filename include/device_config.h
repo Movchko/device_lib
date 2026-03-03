@@ -21,8 +21,8 @@ typedef struct {
 
 
 struct MKUCfg {
-
 	UniqId	UId;
+
 	VDeviceCfg	Devices[16];
 
     /* . резерв нужен чтобы бесшовно обновлять устройство с имзенением структуры,

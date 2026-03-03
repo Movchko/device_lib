@@ -9,9 +9,12 @@
 #define VDEVICE_CFG_SIZE 64 // байт
 
 #define DEVICE_PPKY_TYPE 10
+
 #define DEVICE_IGNITER_TYPE 11
 #define DEVICE_DPT_TYPE 12
 
+#define DEVICE_MCU_IGN_TYPE 13
+#define DEVICE_MCU_TC_TYPE 14
 
 enum DeviceState {
 	DeviceState_Idle,
@@ -23,16 +26,17 @@ enum DeviceState {
 
 enum DType {
     DT_None,
-    DT_DPT,  /* Датчик превышения температуры */
+    DT_DPT = DEVICE_DPT_TYPE,  /* Датчик превышения температуры */
+	DT_IGN = DEVICE_IGNITER_TYPE,  /*  */
 };
 
 
 struct VDeviceCfg {
-
+	DType type;
     /* . резерв нужен чтобы бесшовно обновлять устройство с имзенением структуры,
      * при этом резерв уменьшать на кол-во давленных новых данных
      */
-    uint8_t reserv[VDEVICE_CFG_SIZE]; //
+    uint8_t reserv[VDEVICE_CFG_SIZE - 1]; //
 };
 
 
