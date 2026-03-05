@@ -26,6 +26,11 @@ static uint32_t SendOverflowCount = 0;
 uint8_t USBSndBuf[CDCPKTLEN] = {CDCPRE1, CDCPRE2};
 
 uint8_t CanStopSend = 0;
+uint8_t CanStopRetranslate = 0;
+
+uint8_t GetRetranslate() {
+	return CanStopRetranslate;
+}
 
 /* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
 __attribute__((weak)) void CanSendOverError(void) { (void)0; }
@@ -33,6 +38,11 @@ __attribute__((weak)) void CanSendOverError(void) { (void)0; }
 uint32_t BackendGetSendOverflowCount(void) {
 	return SendOverflowCount;
 }
+
+uint8_t BackendGetDeviceCount(void) {
+	return nDevs;
+}
+
 
 uint8_t *SavedCfgptr; // указатель на сохранённый массив конфигурации
 uint8_t *LocalCfgptr; // указатель на локальный (временный) массив конфигурации
@@ -64,13 +74,16 @@ void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now) {
 }
 
 void BackendProcess() {
-    send_delay++;
+
+
+	/* отправка сообщений в кан из циклического буфера, 1 сообщение каждые SEND_DELAY_MS*/
+	if(CanStopSend == 1)
+		return;
+	else
+		send_delay++;
 
     if(send_delay > SEND_DELAY_MS) {
     	send_delay = 0;
-
-    	if(CanStopSend == 1)
-    		return;
 
 		if (IndexSaveMsgObj != IndexSendMsgObj) {
 			CANSendData((uint8_t *)&BufSendMsgObj[IndexSendMsgObj]);
@@ -80,7 +93,6 @@ void BackendProcess() {
 				IndexSendMsgObj = 0;
 		}
     }
-
 }
 
 void ProtocolParse(uint32_t MsgID, uint8_t *MsgData) {
@@ -139,6 +151,7 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData) {
 	/* Разбор ID по текущему протоколу */
 	can_ext_id_t id;
 	id.ID = MsgID;
+	uint8_t Command = Buf[0];
 
 	/* Broadcast-сообщение: адрес (zone, h_adr, l_adr) = 0, тип устройства задан */
 	if (/*(id.field.zone == 0) &&*/ (id.field.h_adr == 0) && (id.field.l_adr == 0))
@@ -155,14 +168,15 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData) {
 		                     ((id.field.l_adr & 0x3F) == (BoardDevicesList[i].l_adr & 0x3F));
 
 		if ((type_match && addr_match) || (type_match && isBroadcast)) {
-    		uint8_t Command = Buf[0];
+
 
     		if(Command >= 128) {
-    			ServiceCommandParse(i, Buf);
+    			uint8_t *pData = &Buf[1];
+    			ServiceCommandParse(i, Command, pData);
     			return;
     		} else {
                 uint8_t *pData = &Buf[1];
-                CommandCB(i, Buf[0], pData);
+                CommandCB(i, Command, pData);
                 if(isBroadcast) // если broadcast, цикл пройдёт по другим устройствам (массовая остановка и т.п.)
                 	break;
                 else
@@ -189,15 +203,23 @@ void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now) {
     SendMessageFull(can_id, data, Now);
 }
 
-void ServiceCommandParse(uint8_t Dev, uint8_t *MsgData) {
-	uint8_t Command = MsgData[0];
+void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 
 	switch(Command) {
 		case ServiceCmd_ResetMCU: { // Restart MCU
 			ResetMCU();
 		}break;
-		case ServiceCmd_StopStartSend: { // Stop/Start Can Send
-			CanStopSend = MsgData[1];
+		case ServiceCmd_StopStartSend: { // Stop/Start останавливает очередь на отправку в кан, остаются только принудительные (приоритетные отправки)
+			CanStopSend = MsgData[0];
+		}break;
+		case ServiceCmd_StopStartReTranslate: { // Stop/Start останавливает автоматическую ретрансляцию из одного CAN в другой
+			CanStopRetranslate = MsgData[0];
+		}break;
+		case ServicePriorityCmd_CircSetAdr: { // установка адреса по кольцу
+			uint8_t new_adr = MsgData[0];
+			// TODO set adr to yourself
+			MsgData[1]++;
+			SendMessage(Dev, Command, MsgData, SEND_NOW);
 		}break;
 
 
@@ -208,7 +230,7 @@ void ServiceCommandParse(uint8_t Dev, uint8_t *MsgData) {
 		case ServiceCmd_SetConfigWord:
 		case ServiceCmd_SaveConfig:
 		case ServiceCmd_DefaultConfig: {
-			ConfigServiceCmd(Dev, Command, &MsgData[1]);
+			ConfigServiceCmd(Dev, Command, MsgData);
 		}break;
 	}
 }
@@ -283,6 +305,89 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 
 void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr) {
 	SavedCfgptr = SConfigPtr; LocalCfgptr = LConfigPtr;
+}
+
+/***********************************************************************************************************
+ * Оболочка пакета для посылок по другим интерфейсам
+ ***********************************************************************************************************/
+
+uint16_t BSU_Checksum(const uint8_t *data, uint32_t len)
+{
+	uint32_t sum = 0;
+	for (uint32_t i = 0; i < len; i++) {
+		sum += data[i];
+	}
+	return (uint16_t)(sum & 0xFFFFu);
+}
+
+uint16_t BSU_PacketBuildCan(uint8_t *out_buf, uint32_t buf_size, uint32_t can_id, const uint8_t *data)
+{
+	if (out_buf == NULL || data == NULL || buf_size < BSU_PKT_CAN_SIZE) {
+		return 0;
+	}
+
+	uint16_t pos = 0;
+
+	out_buf[pos++] = BSU_PKT_PREAMBLE_LO;
+	out_buf[pos++] = BSU_PKT_PREAMBLE_HI;
+
+	uint16_t pkt_size = BSU_PKT_CAN_SIZE;
+	out_buf[pos++] = (uint8_t)(pkt_size & 0xFFu);
+	out_buf[pos++] = (uint8_t)(pkt_size >> 8);
+
+	out_buf[pos++] = (uint8_t)(BSU_PKT_TYPE_CAN & 0xFFu);
+	out_buf[pos++] = (uint8_t)(BSU_PKT_TYPE_CAN >> 8);
+
+	out_buf[pos++] = 0;  /* seq lo - для CAN всегда 0 */
+	out_buf[pos++] = 0;  /* seq hi */
+
+	out_buf[pos++] = (uint8_t)(can_id & 0xFFu);
+	out_buf[pos++] = (uint8_t)((can_id >> 8) & 0xFFu);
+	out_buf[pos++] = (uint8_t)((can_id >> 16) & 0xFFu);
+	out_buf[pos++] = (uint8_t)((can_id >> 24) & 0xFFu);
+
+	memcpy(&out_buf[pos], data, 8);
+	pos += 8;
+
+	uint16_t crc = BSU_Checksum(out_buf, pos);
+	out_buf[pos++] = (uint8_t)(crc & 0xFFu);
+	out_buf[pos++] = (uint8_t)(crc >> 8);
+
+	return (uint16_t)pos;
+}
+
+uint8_t BSU_PacketParse(const uint8_t *buf, uint32_t len, uint32_t *out_can_id, uint8_t *out_data)
+{
+	if (buf == NULL || out_can_id == NULL || out_data == NULL || len < BSU_PKT_CAN_SIZE) {
+		return 0;
+	}
+
+	if (buf[0] != BSU_PKT_PREAMBLE_LO || buf[1] != BSU_PKT_PREAMBLE_HI) {
+		return 0;
+	}
+
+	uint16_t pkt_size = (uint16_t)buf[2] | ((uint16_t)buf[3] << 8);
+	if (pkt_size != BSU_PKT_CAN_SIZE || len < pkt_size) {
+		return 0;
+	}
+
+	uint16_t pkt_type = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
+	if (pkt_type != BSU_PKT_TYPE_CAN) {
+		return 0;
+	}
+
+	uint16_t calc_crc = BSU_Checksum(buf, pkt_size - BSU_PKT_CHECKSUM_SIZE);
+	uint16_t recv_crc = (uint16_t)buf[pkt_size - 2] | ((uint16_t)buf[pkt_size - 1] << 8);
+	if (calc_crc != recv_crc) {
+		return 0;
+	}
+
+	/* payload: 4 байта ID + 8 байт data, начинается с offset 8 */
+	*out_can_id = (uint32_t)buf[8] | ((uint32_t)buf[9] << 8) |
+	              ((uint32_t)buf[10] << 16) | ((uint32_t)buf[11] << 24);
+	memcpy(out_data, &buf[12], 8);
+
+	return 1;
 }
 
 

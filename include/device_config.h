@@ -2,8 +2,32 @@
 #ifndef INCLUDE_DEVICE_CONFIG_H_
 #define INCLUDE_DEVICE_CONFIG_H_
 
+#ifdef __cplusplus
 #include "device.hpp"
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include "backend.h"
+
+#ifdef __cplusplus
+/* VDeviceCfg, VDEVICE_CFG_SIZE, DEVICE_* — из device.hpp */
+#else
+/* C-режим: device.hpp не подключаем, определяем сами */
+#define VDEVICE_CFG_SIZE  64
+#define DEVICE_PPKY_TYPE    10
+#define DEVICE_IGNITER_TYPE 11
+#define DEVICE_DPT_TYPE     12
+#define DEVICE_MCU_IGN_TYPE 13
+#define DEVICE_MCU_TC_TYPE  14
+
+typedef struct {
+    uint8_t type;   /* C-эквивалент DType */
+    uint8_t reserv[VDEVICE_CFG_SIZE - 1];
+} VDeviceCfg;
+#endif
 //PPKY
 //#define PPKY_CONFIG_SIZE 0x100000 // 1мб &!&!&!&!&!!&
 
@@ -20,7 +44,7 @@ typedef struct {
 } PPKYConfigHeader;
 
 
-struct MKUCfg {
+typedef struct MKUCfg {
 	UniqId	UId;
 
 	VDeviceCfg	Devices[16];
@@ -29,9 +53,9 @@ struct MKUCfg {
      * при этом резерв уменьшать на кол-во давленных новых данных
      */
     uint8_t reserv[1]; // TODO:: PPKY_CONFIG_SIZE - все переменные
-};
+} MKUCfg;
 
-struct PPKYCfg {
+typedef struct PPKYCfg {
 
 	UniqId	UId;
 
@@ -44,10 +68,10 @@ struct PPKYCfg {
      * при этом резерв уменьшать на кол-во давленных новых данных
      */
     uint8_t reserv[1]; // TODO:: PPKY_CONFIG_SIZE - все переменные
-};
+} PPKYCfg;
 //END PPKY
 
-struct DeviceDPTConfig {
+typedef struct DeviceDPTConfig {
 	/* Порог сопротивления для определения "Пожар" (Ом).
 	 * По умолчанию 680 Ом.
 	 * Если измеренное сопротивление <= fire_threshold_ohm, то состояние "Пожар"
@@ -97,10 +121,10 @@ struct DeviceDPTConfig {
 
 	/* резерв для выравнивания под VDeviceCfg::reserv (0x100 байт) */
 	uint8_t reserved[VDEVICE_CFG_SIZE - 17];
-};
+} DeviceDPTConfig;
 
 
-struct DeviceIgniterConfig {
+typedef struct DeviceIgniterConfig {
 	/* 0 - проверка КЗ включена (по умолчанию)
 	 * 1 - проверка КЗ отключена, КЗ считается "Норма"
 	 */
@@ -113,9 +137,12 @@ struct DeviceIgniterConfig {
 
 	/* резерв для выравнивания под VDeviceCfg::reserv (0x100 байт) */
 	uint8_t reserved[VDEVICE_CFG_SIZE - 3];
-};
+} DeviceIgniterConfig;
 
 
 
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* INCLUDE_DEVICE_CONFIG_H_ */

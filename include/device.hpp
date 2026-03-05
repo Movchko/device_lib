@@ -2,6 +2,10 @@
 #ifndef PORT_H_
 #define PORT_H_
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
@@ -16,6 +20,9 @@
 #define DEVICE_MCU_IGN_TYPE 13
 #define DEVICE_MCU_TC_TYPE 14
 
+#define DEVICE_BUTTON_TYPE 15
+#define DEVICE_LSWITCH_TYPE 16
+
 enum DeviceState {
 	DeviceState_Idle,
 	DeviceState_Run,
@@ -26,8 +33,17 @@ enum DeviceState {
 
 enum DType {
     DT_None,
+	/* виртуальыне устрйоства */
     DT_DPT = DEVICE_DPT_TYPE,  /* Датчик превышения температуры */
-	DT_IGN = DEVICE_IGNITER_TYPE,  /*  */
+	DT_IGN = DEVICE_IGNITER_TYPE,  /* Спичка  */
+	DT_BUT = DEVICE_BUTTON_TYPE, /* Кнопка на базе ДПТ */
+	DT_LSW = DEVICE_LSWITCH_TYPE, /* концевик на базе дпт */
+
+
+	/* физические платы */
+	DT_PPKY  = DEVICE_PPKY_TYPE, /* БСУ (ППКУ) */
+	DT_MCU_IGN = DEVICE_MCU_IGN_TYPE, /* МКУ с 1 пускателем и 1 ДПТ*/
+	DT_MCU_TC = DEVICE_MCU_TC_TYPE, /* МКУ с 1 дпт (с MAX) */
 };
 
 
@@ -39,6 +55,10 @@ struct VDeviceCfg {
     uint8_t reserv[VDEVICE_CFG_SIZE - 1]; //
 };
 
+
+#ifdef __cplusplus
+}
+#endif
 
 class VDevice {
 	uint8_t GetNum() {return Num;};
@@ -67,5 +87,7 @@ public:
 
 	virtual uint8_t GetDT() {return 1;}
 };
+
+
 
 #endif
