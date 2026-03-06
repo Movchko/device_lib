@@ -43,7 +43,6 @@ uint8_t BackendGetDeviceCount(void) {
 	return nDevs;
 }
 
-
 uint8_t *SavedCfgptr; // указатель на сохранённый массив конфигурации
 uint8_t *LocalCfgptr; // указатель на локальный (временный) массив конфигурации
 

@@ -51,7 +51,7 @@ typedef struct {
 	uint32_t	UId4;
 	Device 		devId;
 
-	uint8_t 	reserv[UNIQ_ID_SIZE - 16]; // 32 - real data
+	uint8_t 	reserv[UNIQ_ID_SIZE - 24]; // 32 - real data
 } UniqId;
 
 enum ServiceCmd {
