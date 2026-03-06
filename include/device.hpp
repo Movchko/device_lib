@@ -48,12 +48,10 @@ enum DType {
 
 
 struct VDeviceCfg {
-	DType type;
-    /* . резерв нужен чтобы бесшовно обновлять устройство с имзенением структуры,
-     * при этом резерв уменьшать на кол-во давленных новых данных
-     */
-    uint8_t reserv[VDEVICE_CFG_SIZE - 1]; //
-};
+	uint32_t type;  /* 4 байта, выравнивание */
+	/* резерв: размер кратен 4, итого VDeviceCfg кратно 4 */
+	uint8_t reserv[VDEVICE_CFG_SIZE - 4];
+};  /* sizeof = VDEVICE_CFG_SIZE = 64, кратно 4 */
 
 
 #ifdef __cplusplus

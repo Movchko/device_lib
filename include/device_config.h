@@ -24,8 +24,8 @@ extern "C" {
 #define DEVICE_MCU_TC_TYPE  14
 
 typedef struct {
-    uint8_t type;   /* C-эквивалент DType */
-    uint8_t reserv[VDEVICE_CFG_SIZE - 1];
+	uint32_t type;   /* 4 байта, как DType в C++ */
+	uint8_t reserv[VDEVICE_CFG_SIZE - 4];  /* итого 64, кратно 4 */
 } VDeviceCfg;
 #endif
 //PPKY
@@ -49,25 +49,22 @@ typedef struct MKUCfg {
 
 	VDeviceCfg	Devices[16];
 
-    /* . резерв нужен чтобы бесшовно обновлять устройство с имзенением структуры,
-     * при этом резерв уменьшать на кол-во давленных новых данных
-     */
-    uint8_t reserv[1]; // TODO:: PPKY_CONFIG_SIZE - все переменные
+	/* резерв: sizeof(MKUCfg) кратно 4 */
+	uint8_t reserv[4];
 } MKUCfg;
 
 typedef struct PPKYCfg {
 
 	UniqId	UId;
 
-	uint8_t beep; //
+	uint8_t beep;
+	uint8_t _pad[3];  /* явное выравнивание под CfgDevices (offset 36), заменяет reserv — итого 40356 */
 
 	MKUCfg	CfgDevices[32];
 
-	int8_t zone_name[ZONE_NUMBER][ZONE_NAME_SIZE]; //
-    /* . резерв нужен чтобы бесшовно обновлять устройство с имзенением структуры,
-     * при этом резерв уменьшать на кол-во давленных новых данных
-     */
-    uint8_t reserv[1]; // TODO:: PPKY_CONFIG_SIZE - все переменные
+	int8_t zone_name[ZONE_NUMBER][ZONE_NAME_SIZE];
+
+
 } PPKYCfg;
 //END PPKY
 
@@ -119,8 +116,8 @@ typedef struct DeviceDPTConfig {
 	 */
 	uint8_t  is_limit_switch;
 
-	/* резерв для выравнивания под VDeviceCfg::reserv (0x100 байт) */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 17];
+	/* резерв: укладывается в VDeviceCfg::reserv (64-4=60 байт) */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 17];
 } DeviceDPTConfig;
 
 
@@ -135,8 +132,8 @@ typedef struct DeviceIgniterConfig {
 	 */
 	uint16_t start_duration_ms;
 
-	/* резерв для выравнивания под VDeviceCfg::reserv (0x100 байт) */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 3];
+	/* резерв: укладывается в VDeviceCfg::reserv (64-4=60 байт) */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 3];
 } DeviceIgniterConfig;
 
 
