@@ -48,10 +48,10 @@ enum DType {
 
 
 struct VDeviceCfg {
-	uint32_t type;  /* 4 байта, выравнивание */
-	/* резерв: размер кратен 4, итого VDeviceCfg кратно 4 */
-	uint8_t reserv[VDEVICE_CFG_SIZE - 4];
-};  /* sizeof = VDEVICE_CFG_SIZE = 64, кратно 4 */
+	// здесь нет параметров, резервируется под устройство
+	/* резерв: размер кратен 4*/
+	uint8_t reserv[VDEVICE_CFG_SIZE];
+};  /* sizeof = VDEVICE_CFG_SIZE = 64*/
 
 
 #ifdef __cplusplus

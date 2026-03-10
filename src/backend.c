@@ -14,6 +14,7 @@ uint8_t send_delay = 0;
 typedef struct {
     uint32_t ui32MsgID;
     uint8_t pui8MsgData[8];
+    uint8_t bus;
 }
 tBufMsgObject;
 tBufMsgObject BufSendMsgObj[NumSendMsgObj];
@@ -46,11 +47,12 @@ uint8_t BackendGetDeviceCount(void) {
 uint8_t *SavedCfgptr; // указатель на сохранённый массив конфигурации
 uint8_t *LocalCfgptr; // указатель на локальный (временный) массив конфигурации
 
-void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now) {
+void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bus) {
     if (Now) {
 		/* Отправка мимо очереди: пишем в текущий слот и сразу шлём */
 		BufSendMsgObj[IndexSaveMsgObj].ui32MsgID = can_id.ID;
 		memcpy(&BufSendMsgObj[IndexSaveMsgObj].pui8MsgData, Data, 8);
+		BufSendMsgObj[IndexSaveMsgObj].bus = bus;
 		CANSendData((uint8_t *)&BufSendMsgObj[IndexSaveMsgObj]);
 		return;
 	}
@@ -69,6 +71,7 @@ void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now) {
 
 	BufSendMsgObj[IndexSaveMsgObj].ui32MsgID = can_id.ID;
 	memcpy(&BufSendMsgObj[IndexSaveMsgObj].pui8MsgData, Data, 8);
+	BufSendMsgObj[IndexSaveMsgObj].bus = bus;
 	IndexSaveMsgObj = next_save;
 }
 
@@ -94,13 +97,16 @@ void BackendProcess() {
     }
 }
 
-void ProtocolParse(uint32_t MsgID, uint8_t *MsgData) {
+void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
 	uint8_t Buf[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 	uint8_t i;
 	uint8_t isBroadcast = 0;
 	memcpy(Buf, MsgData, sizeof(Buf));
 
 	uint8_t dir = MsgID>>28;
+
+
+#if 0
     if(dir == 1) { // посылки от устройств - пересылаем в USB и работа Listener
     	ListenerCommandCB(MsgID, Buf);
     	/*
@@ -146,7 +152,7 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData) {
 
 		return;
     }
-
+#endif
 	/* Разбор ID по текущему протоколу */
 	can_ext_id_t id;
 	id.ID = MsgID;
@@ -171,7 +177,7 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData) {
 
     		if(Command >= 128) {
     			uint8_t *pData = &Buf[1];
-    			ServiceCommandParse(i, Command, pData);
+    			ServiceCommandParse(i, Command, pData, bus);
     			return;
     		} else {
                 uint8_t *pData = &Buf[1];
@@ -186,7 +192,7 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData) {
 	}
 }
 
-void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now) {
+void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t bus) {
 	can_ext_id_t can_id;
 	uint8_t data[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 
@@ -199,10 +205,10 @@ void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now) {
 	can_id.field.l_adr = BoardDevicesList[Dev].l_adr & 0x3F;
 	can_id.field.zone = BoardDevicesList[Dev].zone & 0x7F;
 
-    SendMessageFull(can_id, data, Now);
+    SendMessageFull(can_id, data, Now, bus);
 }
 
-void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
+void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus) {
 
 	switch(Command) {
 		case ServiceCmd_ResetMCU: { // Restart MCU
@@ -217,8 +223,15 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 		case ServicePriorityCmd_CircSetAdr: { // установка адреса по кольцу
 			uint8_t new_adr = MsgData[0];
 			// TODO set adr to yourself
-			MsgData[1]++;
-			SendMessage(Dev, Command, MsgData, SEND_NOW);
+			SetHAdr(new_adr);
+
+			MsgData[0]++;
+			uint8_t reply_bus;
+			if(bus == BUS_CAN0)
+				reply_bus = BUS_CAN1;
+			else
+				reply_bus = BUS_CAN0;
+			SendMessage(Dev, Command, MsgData, SEND_NOW, reply_bus);
 		}break;
 
 
@@ -242,7 +255,7 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 			uint16_t sz = GetConfigSize();
 			Data[0] = (sz >> 8 ) & 0xFF;
 			Data[1] = (sz >> 0 ) & 0xFF;
-			SendMessage(Dev, Command, Data, SEND_NOW);
+			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		}break;
 		case ServiceCmd_GetConfigCRC: { // вернуть контрольную сумму массива конфигурации
 			uint32_t crc = 0;
@@ -254,7 +267,7 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 			for(uint8_t i = 0; i < 4; i++) {
 				Data[i] = (crc >> (24 - 8 * i)) & 0xFF;
 			}
-			SendMessage(Dev, Command, Data, SEND_NOW);
+			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		} break;
 		case ServiceCmd_GetConfigWord: {
 			uint16_t num_word = 0;
@@ -269,7 +282,7 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 			for(uint8_t i = 0; i < 4; i++) {
 				Data[i + 2] = (word >> (24 - 8 * i)) & 0xFF;
 			}
-			SendMessage(Dev, Command, Data, SEND_NOW);
+			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		}break;
 		case ServiceCmd_SetConfigWord: {
 			uint16_t num_word = 0;
@@ -291,7 +304,7 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 			for(uint8_t i = 0; i < 4; i++) {
 				Data[i + 2] = (word >> (24 - 8 * i)) & 0xFF;
 			}
-			SendMessage(Dev, Command, Data, SEND_NOW);
+			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		}break;
 		case ServiceCmd_SaveConfig: { // save config from local
 			SaveConfig();

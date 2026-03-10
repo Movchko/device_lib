@@ -40,11 +40,23 @@ class VDeviceIgniter: public VDevice {
 	/* флаг: 1 - игнорировать КЗ, считать как норму */
 	uint8_t disable_sc_check;
 
-	/* время разгона ШИМ, мс */
-	uint16_t start_duration_ms;
+	/* пороги ADC (мВ) и число повторов прожига */
+	uint16_t threshold_break_low;
+	uint16_t threshold_break_high;
+	uint8_t burn_retry_count;
 
-	/* внутренний счётчик времени запуска, мс */
+	/* внутренний счётчик времени в Run, мс */
 	uint16_t run_elapsed_ms;
+	/* фаза прожига: 0=разгон, 1=удержание, 2=проверка, 3=повтор */
+	uint8_t burn_phase;
+	uint8_t burn_cycle;  /* номер цикла (0 или 1) */
+
+	/* дебаунс 100мс для состояния линии по ADC */
+	uint8_t debounce_candidate;
+	uint8_t debounce_cnt;
+
+	/* после выключения ШИМ — не доверять ADC 100мс (установка напряжения) */
+	uint8_t pwm_off_cooldown_ms;
 
 	/* текущий уровень ШИМ (0..PWM_MAX) */
 	uint16_t pwm_value;
@@ -68,6 +80,13 @@ public:
 
 	/* Вызывается из внешнего кода при изменении/опросе линии */
 	void SetLineState(DeviceIgniterLineState st);
+
+	/* Обновление состояния линии по ADC (мВ), с дебаунсом 100мс.
+	 * Вызывать только когда ШИМ выключен — во время работы ШИМ значения АЦП невалидны. */
+	void UpdateLineFromAdcMv(uint16_t adc_mv);
+
+	/* true = ШИМ активен (разгон или удержание), ADC невалиден */
+	bool IsPwmActive() const;
 
 	/* Текущий уровень ШИМ (для низкоуровневого драйвера) */
 	uint16_t GetPwm() const { return pwm_value; }

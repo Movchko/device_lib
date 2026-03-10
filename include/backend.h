@@ -25,6 +25,10 @@ extern uint8_t USBSndBuf[CDCPKTLEN];
 
 #define UNIQ_ID_SIZE	32
 
+#define BUS_CAN0		1
+#define BUS_CAN1		2
+#define BUS_CAN12		3
+
 typedef union {
   uint32_t ID; /* Идентификатор в форме 32-х разрядного числа */
   struct {
@@ -70,20 +74,18 @@ enum ServiceConfigCmd {
 	ServiceCmd_DefaultConfig 		= 155
 };
 
-
-void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData);
-void ProtocolParse(uint32_t ui32MsgID, uint8_t *pui8MsgData);
+// bus - битовая маска - номер шины (0b01 - CAN 0, 0b10 - CAN 1)
+void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus);
+void ProtocolParse(uint32_t ui32MsgID, uint8_t *pui8MsgData, uint8_t bus);
 
 void BackendProcess(); // необходимо вызывать в главной программе. 1000герц
 
 
-void ServicePriorityCommandParse(uint8_t Command, uint8_t *MsgData);
-
 /* положить сообщение в очередь на отравку
  * now 1 - отправить без очереди
  */
-void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now);
-void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now);
+void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t bus);
+void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bus);
 
 void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData);
 
@@ -106,7 +108,7 @@ void ListenerCommandCB(uint32_t MsgID, uint8_t *MsgData);
 uint32_t GetID();
 void FlashWriteData(uint8_t *ConfigPtr, uint16_t ConfigSize);
 void ResetMCU();
-
+void SetHAdr(uint8_t h_adr);
 
 
 // работа с конфигурацией

@@ -34,6 +34,8 @@ typedef struct {
 #define ZONE_NAME_SIZE	64 // 64 символа на имя зоны
 #define ZONE_NUMBER		100 // количество зон
 
+#define NUM_DEV_IN_MCU 32
+
 // Заголовок области конфигурации во Flash
 #define PPKY_CFG_HEADER_MAGIC 0x50504B59u /* 'P','P','K','Y' */
 
@@ -47,10 +49,14 @@ typedef struct {
 typedef struct MKUCfg {
 	UniqId	UId;
 
-	VDeviceCfg	Devices[16];
+	uint32_t VDtype[NUM_DEV_IN_MCU];  /* 4 байта, выравнивание */
+	uint32_t zone_delay;
+	uint32_t module_delay[NUM_DEV_IN_MCU];
+	VDeviceCfg	Devices[NUM_DEV_IN_MCU];
 
+	uint8_t	reserv[64];
 	/* резерв: sizeof(MKUCfg) кратно 4 */
-	uint8_t reserv[4];
+
 } MKUCfg;
 
 typedef struct PPKYCfg {
@@ -127,13 +133,16 @@ typedef struct DeviceIgniterConfig {
 	 */
 	uint8_t disable_sc_check;
 
-	/* Длительность разгона ШИМ, мс.
-	 * По умолчанию 1000 мс.
-	 */
-	uint16_t start_duration_ms;
+	/* Пороги ADC (мВ): 0=ошибка, 1..break_low=норма, break_low..break_high=обрыв/КЗ, >break_high=ошибка.
+	 * По умолчанию 1000, 3000 */
+	uint16_t threshold_break_low;   /* мВ, нижняя граница "обрыв/КЗ" */
+	uint16_t threshold_break_high;  /* мВ, выше — ошибка */
 
-	/* резерв: укладывается в VDeviceCfg::reserv (64-4=60 байт) */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 3];
+	/* Количество повторных циклов прожига при отсутствии обрыва (0 или 1). По умолчанию 1 */
+	uint8_t burn_retry_count;
+
+	/* резерв */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 6];
 } DeviceIgniterConfig;
 
 
