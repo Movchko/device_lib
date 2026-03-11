@@ -198,7 +198,7 @@ void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t b
 
 	data[0] = Cmd;
 	memcpy(&data[1], Data, 7);
-
+	can_id.ID = 0;
 	can_id.field.dir = 1;
 	can_id.field.d_type = BoardDevicesList[Dev].d_type & 0x7F;
 	can_id.field.h_adr = BoardDevicesList[Dev].h_adr;
