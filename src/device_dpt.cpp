@@ -7,97 +7,74 @@ VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
 	Status = DeviceDPTStatus_Idle;
 	prevLineState = LineState = DeviceDPTLineState_Normal;
 	Config = nullptr;
-	fire_threshold_ohm = 680;
-	normal_threshold_ohm = 5380;
-	break_threshold_ohm = 100000;
-	resistor_r1_ohm = 10000;
-	resistor_r2_ohm = 10000;
-	supply_voltage_mv = 3300;
-	adc_resolution = 4095;
-	is_limit_switch = 0;
+	Mode = DeviceDPTMode_DPT;
+	max_fire_threshold_c = 60;      /* порог MAX по умолчанию, °C */
+	state_change_delay_ms = 100;    /* фильтр по времени по умолчанию */
 	adc_ch1_value = 0;
 	adc_ch2_value = 0;
 	measured_resistance_ohm = 0;
 	Counter1s = 0;
+	pendingLineState = LineState;
+	pendingTimeMs = 0;
+	max_temp_c = 0;
+	max_fault = 0;
+	measureModeIsMax = 0;
+	useMax = 0;
+	maxRetryTimerMs = 0;
+	maxSettleMs = 0;
+	probeAfterShort = 0;
+	probeTimerMs = 0;
 }
 
 void VDeviceDPT::Init() {
 	/* Привязка конфигурации к общему буферу VDeviceCfg::reserv */
 	if (CfgPtr != nullptr) {
 		Config = reinterpret_cast<DeviceDPTConfig*>(CfgPtr->reserv);
-		/* Если конфиг пустой (все нули), устанавливаем значения по умолчанию */
-		if (Config->fire_threshold_ohm == 0 && Config->normal_threshold_ohm == 0) {
-			Config->fire_threshold_ohm = 680;
-			Config->normal_threshold_ohm = 5380;
-			Config->break_threshold_ohm = 100000;
-			Config->resistor_r1_ohm = 10000;
-			Config->resistor_r2_ohm = 10000;
-			Config->supply_voltage_mv = 3300;
-			Config->adc_resolution = 4095;
-			Config->is_limit_switch = 0;
-		}
 	} else {
 		Config = nullptr;
 	}
 
 	if (Config != nullptr) {
-		/* Загружаем пороги из конфига */
-		if (Config->fire_threshold_ohm == 0) {
-			Config->fire_threshold_ohm = 680;
+		uint8_t mode = Config->mode;
+		if (mode <= DeviceDPTMode_Button) {
+			Mode = static_cast<DeviceDPTMode>(mode);
+		} else {
+			Mode = DeviceDPTMode_DPT;
 		}
-		fire_threshold_ohm = Config->fire_threshold_ohm;
 
-		if (Config->normal_threshold_ohm == 0) {
-			Config->normal_threshold_ohm = 5380;
+		useMax = Config->use_max ? 1u : 0u;
+
+		if (Config->max_fire_threshold_c != 0u) {
+			max_fire_threshold_c = Config->max_fire_threshold_c;
+		} else {
+			max_fire_threshold_c = 60u;
 		}
-		normal_threshold_ohm = Config->normal_threshold_ohm;
 
-		if (Config->break_threshold_ohm == 0) {
-			Config->break_threshold_ohm = 100000;
+		if (Config->state_change_delay_ms != 0u) {
+			state_change_delay_ms = Config->state_change_delay_ms;
+		} else {
+			state_change_delay_ms = 100u;
 		}
-		break_threshold_ohm = Config->break_threshold_ohm;
-
-		/* Загружаем параметры делителя */
-		if (Config->resistor_r1_ohm == 0) {
-			Config->resistor_r1_ohm = 10000;
-		}
-		resistor_r1_ohm = Config->resistor_r1_ohm;
-
-		if (Config->resistor_r2_ohm == 0) {
-			Config->resistor_r2_ohm = 10000;
-		}
-		resistor_r2_ohm = Config->resistor_r2_ohm;
-
-		if (Config->supply_voltage_mv == 0) {
-			Config->supply_voltage_mv = 3300;
-		}
-		supply_voltage_mv = Config->supply_voltage_mv;
-
-		if (Config->adc_resolution == 0) {
-			Config->adc_resolution = 4095;
-		}
-		adc_resolution = Config->adc_resolution;
-
-		/* Режим концевика */
-		is_limit_switch = Config->is_limit_switch ? 1 : 0;
 	} else {
-		/* Значения по умолчанию */
-		fire_threshold_ohm = 680;
-		normal_threshold_ohm = 5380;
-		break_threshold_ohm = 100000;
-		resistor_r1_ohm = 10000;
-		resistor_r2_ohm = 10000;
-		supply_voltage_mv = 3300;
-		adc_resolution = 4095;
-		is_limit_switch = 0;
+		Mode = DeviceDPTMode_DPT;
+		useMax = 1u;
+		max_fire_threshold_c = 60u;
+		state_change_delay_ms = 100u;
 	}
 
 	State = DeviceDPTState_Idle;
 	Status = DeviceDPTStatus_Idle;
 	LineState = DeviceDPTLineState_Normal;
+	pendingLineState = LineState;
+	pendingTimeMs = 0;
 	adc_ch1_value = 0;
 	adc_ch2_value = 0;
 	measured_resistance_ohm = 0;
+	measureModeIsMax = 0;
+	maxRetryTimerMs = 0;
+	maxSettleMs = 0;
+	probeAfterShort = 0;
+	probeTimerMs = 0;
 	UpdateStatus(DeviceDPTStatus_Idle);
 }
 
@@ -105,12 +82,12 @@ void VDeviceDPT::Process() {
 	switch(State) {
 		case DeviceDPTState_Idle: {
 			/* В режиме Idle просто обновляем состояние линии */
-			UpdateLineState();
+			UpdateLineStateFiltered();
 		} break;
 
 		case DeviceDPTState_Error: {
 			/* В режиме Error тоже проверяем линию (может восстановиться) */
-			UpdateLineState();
+			UpdateLineStateFiltered();
 		} break;
 	}
 }
@@ -118,12 +95,13 @@ void VDeviceDPT::Process() {
 void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 	switch(Command) {
 		case 2: {
-			/* Установка порога "Пожар" (младший байт, старший байт) */
+			/* Установка порога MAX (°C) (младший байт, старший байт) */
 			if (Config != nullptr && Parameters != nullptr) {
 				uint16_t threshold = Parameters[0] | (Parameters[1] << 8);
 				if (threshold > 0) {
-					Config->fire_threshold_ohm = threshold;
-					fire_threshold_ohm = threshold;
+					Config->reserved[1] = static_cast<uint8_t>(threshold & 0xFFu);
+					Config->reserved[2] = static_cast<uint8_t>((threshold >> 8) & 0xFFu);
+					max_fire_threshold_c = threshold;
 					if (VDeviceSaveCfg != nullptr) {
 						VDeviceSaveCfg();
 					}
@@ -132,12 +110,13 @@ void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 		} break;
 
 		case 3: {
-			/* Установка порога "Норма" (младший байт, старший байт) */
+			/* Установка времени стабилизации уровня (младший байт, старший байт), мс */
 			if (Config != nullptr && Parameters != nullptr) {
 				uint16_t threshold = Parameters[0] | (Parameters[1] << 8);
 				if (threshold > 0) {
-					Config->normal_threshold_ohm = threshold;
-					normal_threshold_ohm = threshold;
+					Config->reserved[3] = static_cast<uint8_t>(threshold & 0xFFu);
+					Config->reserved[4] = static_cast<uint8_t>((threshold >> 8) & 0xFFu);
+					state_change_delay_ms = threshold;
 					if (VDeviceSaveCfg != nullptr) {
 						VDeviceSaveCfg();
 					}
@@ -146,58 +125,15 @@ void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 		} break;
 
 		case 4: {
-			/* Установка порога "Обрыв" (младший байт, старший байт) */
+			/* Установка режима устройства (0=DPT,1=Limit,2=Button) */
 			if (Config != nullptr && Parameters != nullptr) {
-				uint16_t threshold = Parameters[0] | (Parameters[1] << 8);
-				if (threshold > 0) {
-					Config->break_threshold_ohm = threshold;
-					break_threshold_ohm = threshold;
+				uint8_t mode = Parameters[0];
+				if (mode <= DeviceDPTMode_Button) {
+					Config->reserved[0] = mode;
+					Mode = static_cast<DeviceDPTMode>(mode);
 					if (VDeviceSaveCfg != nullptr) {
 						VDeviceSaveCfg();
 					}
-				}
-			}
-		} break;
-
-		case 5: {
-			/* Установка номинала резистора R1 (младший байт, старший байт) */
-			if (Config != nullptr && Parameters != nullptr) {
-				uint16_t r1 = Parameters[0] | (Parameters[1] << 8);
-				if (r1 > 0) {
-					Config->resistor_r1_ohm = r1;
-					resistor_r1_ohm = r1;
-					if (VDeviceSaveCfg != nullptr) {
-						VDeviceSaveCfg();
-					}
-				}
-			}
-		} break;
-
-		case 6: {
-			/* Установка номинала резистора R2 (младший байт, старший байт) */
-			if (Config != nullptr && Parameters != nullptr) {
-				uint16_t r2 = Parameters[0] | (Parameters[1] << 8);
-				if (r2 > 0) {
-					Config->resistor_r2_ohm = r2;
-					resistor_r2_ohm = r2;
-					if (VDeviceSaveCfg != nullptr) {
-						VDeviceSaveCfg();
-					}
-				}
-			}
-		} break;
-
-		case 7: {
-			/* Включение/выключение режима концевика
-			 * Parameters[0] = 0 - обычный ДПТ (\"Пожар\")
-			 * Parameters[0] = 1 - режим концевика (\"нажатие\")
-			 */
-			if (Config != nullptr && Parameters != nullptr) {
-				uint8_t val = Parameters[0] ? 1 : 0;
-				Config->is_limit_switch = val;
-				is_limit_switch = val;
-				if (VDeviceSaveCfg != nullptr) {
-					VDeviceSaveCfg();
 				}
 			}
 		} break;
@@ -228,12 +164,11 @@ void VDeviceDPT::SetStatus() {
 	/* Data[1..2] - измеренное сопротивление (младший байт, старший байт), Ом */
 	Data[1] = measured_resistance_ohm & 0xFF;
 	Data[2] = (measured_resistance_ohm >> 8) & 0xFF;
-	Data[3] = (measured_resistance_ohm >> 16) & 0xFF;
 
-	/* Data[4..5] - значения АЦП каналов (для отладки) */
-	Data[4] = adc_ch1_value & 0xFF;
-	Data[5] = (adc_ch1_value >> 8) & 0xFF;
-	Data[6] = adc_ch2_value & 0xFF;
+
+	/* Data[3..4] -  */
+	Data[3] = max_temp_c & 0xFF;
+	Data[4] = max_fault & 0xFF;
 
 	if (VDeviceSetStatus != nullptr) {
 		VDeviceSetStatus(Num, Status, Data);
@@ -241,85 +176,217 @@ void VDeviceDPT::SetStatus() {
 }
 
 void VDeviceDPT::Timer1ms() {
-	Counter1s++;
-	if (Counter1s >= 1000) {
-		SetStatus();
-		Counter1s = 0;
-	}
-	Process();
+    Counter1s++;
+    if (Counter1s >= 1000) {
+        SetStatus();
+        Counter1s = 0;
+    }
+
+    /* Обновляем состояние линии (по сопротивлению или по MAX, в зависимости от measureModeIsMax/useMax) */
+    Process();  // внутри Process -> UpdateLineStateFiltered -> prevLineState
+
+    /* Окно стабилизации после пробного включения 24В */
+    if (probeAfterShort) {
+        const uint16_t PROBE_SETTLE_MS = 500;
+        if (probeTimerMs < PROBE_SETTLE_MS) {
+            probeTimerMs++;
+            /* В течение окна 500 мс не переключаемся обратно на MAX,
+             * даём АЦП/фильтру увидеть, что КЗ ушёл.
+             */
+            return;
+        } else {
+            probeAfterShort = 0;
+            probeTimerMs = 0;
+        }
+    }
+
+    /* Логика работы с КЗ и MAX */
+
+    if (!useMax) {
+        /* 1. MAX не используется: только включаем/отключаем 24В раз в 3 с при КЗ */
+
+        if (prevLineState == DeviceDPTLineState_Short) {
+            /* Первый вход в КЗ — сразу снимаем 24В */
+            if (maxRetryTimerMs == 0) {
+                if (DPT_SetMaxMeasureMode) {
+                    /* Используем как "24В OFF".
+                     * Если хочешь без щёлкания реле — скорректируй реализацию App_DPT_SetMaxMeasureMode.
+                     */
+                    DPT_SetMaxMeasureMode();
+                }
+            }
+
+            if (maxRetryTimerMs < 3000u) {
+                maxRetryTimerMs++;
+            } else {
+                /* Каждые 3 секунды пробуем снова подать 24В и измерить сопротивление */
+                maxRetryTimerMs = 0;
+                if (DPT_SetResMeasureMode) {
+                    probeAfterShort = 1;
+                    probeTimerMs = 0;
+                    DPT_SetResMeasureMode();  // кратко включаем 24В, измерение дальше по ADC
+                }
+            }
+        } else {
+            maxRetryTimerMs = 0;
+        }
+
+    } else {
+        /* 2. MAX используется (useMax=1) */
+
+        /* Переход в режим MAX при устойчивом КЗ (только вне окна пробы) */
+        if (!measureModeIsMax && !probeAfterShort && prevLineState == DeviceDPTLineState_Short) {
+            measureModeIsMax = 1;
+            maxRetryTimerMs = 0;
+            maxSettleMs = 0;
+            if (DPT_SetMaxMeasureMode) {
+                /* 24В OFF, реле на MAX */
+                DPT_SetMaxMeasureMode();
+            }
+        }
+
+        if (measureModeIsMax) {
+            /* Дать MAX стабилизироваться после переключения реле */
+            const uint16_t MAX_SETTLE_TIME_MS = 2000;
+            if (maxSettleMs < MAX_SETTLE_TIME_MS) {
+                maxSettleMs++;
+                /* Пока MAX не устаканился — не выходим из режима MAX,
+                 * считаем, что линия по-прежнему в состоянии КЗ.
+                 */
+                return;
+            }
+
+            /* Мы сейчас в режиме MAX (классификация по max_temp_c/max_fault) */
+
+            if (prevLineState != DeviceDPTLineState_Short) {
+                /* По MAX линия перестала быть КЗ → можно вернуться к сопротивлению */
+                measureModeIsMax = 0;
+                maxRetryTimerMs = 0;
+                maxSettleMs = 0;
+                if (DPT_SetResMeasureMode) {
+                    DPT_SetResMeasureMode();  // вернуть 24В и измерение сопротивления
+                }
+            } else {
+                /* Линия по-прежнему считается КЗ → раз в 3 с пробуем включить 24В и померить R */
+                if (maxRetryTimerMs < 3000u) {
+                    maxRetryTimerMs++;
+                } else {
+                    maxRetryTimerMs = 0;
+                    /* Краткий выход в режим сопротивления для проверки КЗ */
+                    measureModeIsMax = 0;
+                    probeAfterShort = 1;
+                    probeTimerMs = 0;
+                    if (DPT_SetResMeasureMode) {
+                        DPT_SetResMeasureMode(); // 24В ON, реле на сопротивление
+                    }
+                    /* После этого ADC обновится, UpdateLineStateFiltered опять даст либо Short, либо другое состояние;
+                     * при повторном устойчивом КЗ снова войдём в блок выше и вернёмся к MAX.
+                     */
+                }
+            }
+        } else {
+            /* Вне режима MAX, MAX включён, но нет КЗ — просто сбрасываем таймер */
+            if (prevLineState != DeviceDPTLineState_Short) {
+                maxRetryTimerMs = 0;
+                maxSettleMs = 0;
+            }
+        }
+    }
 }
 
 void VDeviceDPT::SetAdcValues(uint16_t ch1, uint16_t ch2) {
 	adc_ch1_value = ch1;
 	adc_ch2_value = ch2;
 
-	/* Рассчитываем сопротивление по первому каналу АЦП */
-	measured_resistance_ohm = CalculateResistance(ch1);
+	/* В ch1 уже приходит сопротивление линии в Омах */
+	measured_resistance_ohm = ch1;
 
 	/* Обновляем состояние линии на основе измеренного сопротивления */
-	UpdateLineState();
+	UpdateLineStateFiltered();
 }
 
-uint32_t VDeviceDPT::CalculateResistance(uint16_t adc_value) {
-	/* Формула расчёта сопротивления линии по делителю напряжения:
-	 * R_line = R2 * (V_supply / V_adc - 1) - R1
-	 * где:
-	 * V_adc = adc_value * supply_voltage_mv / adc_resolution
-	 *
-	 * Упрощённая формула:
-	 * R_line = R2 * (adc_resolution / adc_value - 1) - R1
-	 */
-
-	if (adc_value == 0) {
-		/* КЗ или ошибка измерения */
-		return 0;
+void VDeviceDPT::SetMaxStatus(int16_t temp_c, uint8_t fault) {
+	max_temp_c = temp_c;
+	max_fault = fault ? 1u : 0u;
+	/* В режиме MAX классификация состояния идёт по данным MAX */
+	if (measureModeIsMax) {
+		UpdateLineStateFiltered();
 	}
-
-	if (adc_value >= adc_resolution) {
-		/* Обрыв - очень большое сопротивление */
-		return break_threshold_ohm + 1000;
-	}
-
-	/* Расчёт сопротивления */
-	uint32_t v_adc_mv = ((uint32_t)adc_value * supply_voltage_mv) / adc_resolution;
-
-	if (v_adc_mv == 0) {
-		return 0;
-	}
-
-	/* R_line = R2 * (V_supply / V_adc - 1) - R1 */
-	uint32_t ratio = ((uint32_t)supply_voltage_mv * resistor_r2_ohm) / v_adc_mv;
-	uint32_t r_line = ratio - resistor_r2_ohm - resistor_r1_ohm;
-
-	return r_line;
 }
 
-void VDeviceDPT::UpdateLineState() {
-	/* Определяем состояние линии на основе измеренного сопротивления */
-	if (measured_resistance_ohm == 0) {
-		LineState = DeviceDPTLineState_Short;  /* КЗ */
-	} else if (measured_resistance_ohm <= fire_threshold_ohm) {
-		/* При включенном режиме концевика считаем это \"нажатием\",
-		 * иначе - событие \"Пожар\".
-		 */
-		if (is_limit_switch) {
-			LineState = DeviceDPTLineState_Press;   /* Нажатие концевика */
+void VDeviceDPT::UpdateLineStateInstant() {
+	uint32_t r = measured_resistance_ohm;
+	if (!measureModeIsMax) {
+		/* Классификация по сопротивлению */
+		if (r > DPT_LIMIT_BREAK) {
+			LineState = DeviceDPTLineState_Break;
+		} else if (r >= DPT_LIMIT_NORMAL) {
+			LineState = DeviceDPTLineState_Normal;
+		} else if (r >= DPT_LIMIT_FAULT) {
+			/* Неисправность линии */
+			LineState = DeviceDPTLineState_Fault;
+		} else if (r >= DPT_LIMIT_FIRE) {
+			/* Событие: трактуем по режиму */
+			if (Mode == DeviceDPTMode_DPT) {
+				LineState = DeviceDPTLineState_Fire;
+			} else {
+				LineState = DeviceDPTLineState_Press;
+			}
 		} else {
-			LineState = DeviceDPTLineState_Fire;    /* Пожар (680 Ом) */
+			/* 0..DPT_LIMIT_FIRE — КЗ.
+			 * Дальнейшая реакция (отключение 24В, переход на MAX и циклы 3 с)
+			 * реализуется в Timer1ms через prevLineState/measureModeIsMax/useMax.
+			 */
+			LineState = DeviceDPTLineState_Short;
 		}
-	} else if (measured_resistance_ohm <= normal_threshold_ohm) {
-		LineState = DeviceDPTLineState_Normal; /* Норма (5380 Ом) */
-	} else if (measured_resistance_ohm > break_threshold_ohm) {
-		LineState = DeviceDPTLineState_Break;  /* Обрыв */
 	} else {
-		/* Промежуточное значение - считаем нормой */
-		LineState = DeviceDPTLineState_Normal;
-	}
-
-	if(prevLineState != LineState) {
-		prevLineState = LineState;
-	/* Обновляем статус при изменении состояния линии */
-		SetStatus();
+		/* Классификация по MAX:
+		 * fault != 0        → неисправность
+		 * !fault && T>порог → пожар
+		 * иначе             → КЗ без пожара
+		 */
+		if (max_fault) {
+			LineState = DeviceDPTLineState_Fault;
+		} else
+			if (max_temp_c > static_cast<int16_t>(max_fire_threshold_c)) {
+				LineState = DeviceDPTLineState_Fire;
+			} else
+				LineState = DeviceDPTLineState_Short;
 	}
 }
 
+void VDeviceDPT::UpdateLineStateFiltered() {
+	/* Кандидат в новое состояние по текущему измерению */
+	UpdateLineStateInstant();
+	DeviceDPTLineState candidate = LineState;
+
+	if (candidate != prevLineState) {
+		if (pendingLineState != candidate) {
+			pendingLineState = candidate;
+			pendingTimeMs = 0;
+		} else {
+			if (pendingTimeMs < state_change_delay_ms) {
+				pendingTimeMs++;
+			}
+			if (pendingTimeMs >= state_change_delay_ms) {
+				prevLineState = candidate;
+				LineState = candidate;
+				SetStatus();
+			}
+		}
+	} else {
+		/* Состояние не меняется — сбрасываем фильтр */
+		pendingLineState = prevLineState;
+		pendingTimeMs = 0;
+		LineState = prevLineState;
+	}
+}
+
+uint8_t VDeviceDPT::GetDT() {
+	switch(Mode) {
+	case DeviceDPTMode_DPT: return DEVICE_DPT_TYPE;
+	case DeviceDPTMode_Button: return DEVICE_BUTTON_TYPE;
+	case DeviceDPTMode_Limit: return DEVICE_LSWITCH_TYPE;
+	}
+	return DEVICE_DPT_TYPE;
+}

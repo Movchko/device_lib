@@ -47,6 +47,8 @@ uint8_t BackendGetDeviceCount(void) {
 uint8_t *SavedCfgptr; // указатель на сохранённый массив конфигурации
 uint8_t *LocalCfgptr; // указатель на локальный (временный) массив конфигурации
 
+
+
 void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bus) {
     if (Now) {
 		/* Отправка мимо очереди: пишем в текущий слот и сразу шлём */
@@ -172,12 +174,12 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
 		                     (id.field.h_adr == BoardDevicesList[i].h_adr) &&
 		                     ((id.field.l_adr & 0x3F) == (BoardDevicesList[i].l_adr & 0x3F));
 
-		if ((type_match && addr_match) || (type_match && isBroadcast)) {
+		if ((type_match && addr_match) || (/*type_match &&*/ isBroadcast)) {
 
 
     		if(Command >= 128) {
     			uint8_t *pData = &Buf[1];
-    			ServiceCommandParse(i, Command, pData, bus);
+    			ServiceCommandParse(0, Command, pData, bus);
     			return;
     		} else {
                 uint8_t *pData = &Buf[1];
@@ -190,6 +192,22 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
     		}
 	    }
 	}
+}
+
+void SendAllMessage(uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t bus) {
+	can_ext_id_t can_id;
+	uint8_t data[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+
+	data[0] = Cmd;
+	memcpy(&data[1], Data, 7);
+	can_id.ID = 0;
+	can_id.field.dir = 1;
+	can_id.field.d_type = 0;
+	can_id.field.h_adr = 0;
+	can_id.field.l_adr = 0;
+	can_id.field.zone = 0;
+
+    SendMessageFull(can_id, data, Now, bus);
 }
 
 void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t bus) {
@@ -219,10 +237,11 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 		}break;
 		case ServiceCmd_StopStartReTranslate: { // Stop/Start останавливает автоматическую ретрансляцию из одного CAN в другой
 			CanStopRetranslate = MsgData[0];
+
 		}break;
 		case ServicePriorityCmd_CircSetAdr: { // установка адреса по кольцу
 			uint8_t new_adr = MsgData[0];
-			// TODO set adr to yourself
+
 			SetHAdr(new_adr);
 
 			MsgData[0]++;
@@ -231,7 +250,7 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 				reply_bus = BUS_CAN1;
 			else
 				reply_bus = BUS_CAN0;
-			SendMessage(Dev, Command, MsgData, SEND_NOW, reply_bus);
+			SendAllMessage(Command, MsgData, SEND_NOW, reply_bus);
 		}break;
 
 

@@ -5,7 +5,16 @@
 #include "device.hpp"
 #include "device_config.h"
 
-
+// в омах
+// всё что выше - обрыв
+#define DPT_LIMIT_BREAK 1500//6200
+//  норма
+#define DPT_LIMIT_NORMAL 820//4100
+// неисправность
+#define DPT_LIMIT_FAULT 160//910
+//  пожар
+#define DPT_LIMIT_FIRE 100//560
+//  КЗ
 
 enum DeviceDPTState {
 	DeviceDPTState_Idle,
@@ -21,9 +30,21 @@ enum DeviceDPTStatus {
 enum DeviceDPTLineState {
 	DeviceDPTLineState_Normal = 0,  /* Норма (680+4700 Ом) */
 	DeviceDPTLineState_Break  = 1,  /* Обрыв */
-	DeviceDPTLineState_Short  = 2, /* КЗ (0 Ом) */
+	DeviceDPTLineState_Short  = 2,  /* КЗ (0 Ом) */
 	DeviceDPTLineState_Fire   = 3,  /* Пожар (680 Ом) */
-	DeviceDPTLineState_Press  = 4   /* Нажатие / вскрытие концевика */
+	DeviceDPTLineState_Press  = 4,  /* Нажатие / вскрытие концевика */
+	DeviceDPTLineState_Fault  = 5   /* Неисправность */
+};
+
+/* Режим работы виртуального устройства:
+ * 0 - ДПТ (пожар)
+ * 1 - концевик (открытие)
+ * 2 - кнопка (нажатие)
+ */
+enum DeviceDPTMode {
+	DeviceDPTMode_DPT      = 0,
+	DeviceDPTMode_Limit    = 1,
+	DeviceDPTMode_Button   = 2
 };
 
 class VDeviceDPT: public VDevice {
@@ -35,19 +56,16 @@ class VDeviceDPT: public VDevice {
 	DeviceDPTLineState prevLineState, LineState;
 	DeviceDPTConfig *Config;
 
-	/* Пороги сопротивления (из конфига) */
-	uint16_t fire_threshold_ohm;
-	uint16_t normal_threshold_ohm;
-	uint32_t break_threshold_ohm;
+	/* Режим устройства (ДПТ / концевик / кнопка) */
+	DeviceDPTMode Mode;
 
-	/* Параметры делителя напряжения */
-	uint16_t resistor_r1_ohm;
-	uint16_t resistor_r2_ohm;
-	uint16_t supply_voltage_mv;
-	uint16_t adc_resolution;
+	/* Порог для MAX (°C) и задержка смены состояния (мс) */
+	uint16_t max_fire_threshold_c;
+	uint16_t state_change_delay_ms;
 
-	/* Флаг режима концевика */
-	uint8_t  is_limit_switch;
+	/* Данные MAX: последняя температура и флаг неисправности */
+	int16_t max_temp_c;
+	uint8_t max_fault;
 
 	/* Текущие значения АЦП каналов */
 	uint16_t adc_ch1_value;
@@ -56,21 +74,50 @@ class VDeviceDPT: public VDevice {
 	/* Текущее измеренное сопротивление линии (Ом) */
 	uint32_t measured_resistance_ohm;
 
-	void UpdateLineState();
-	uint32_t CalculateResistance(uint16_t adc_value);
+	/* Фильтр по времени для смены состояния */
+	DeviceDPTLineState pendingLineState;
+	uint16_t pendingTimeMs;
+
+	/* Режим измерения: по сопротивлению или по MAX */
+	uint8_t measureModeIsMax;
+
+	uint8_t useMax;
+
+	/* Таймер: ожидание стабилизации MAX после переключения, мс */
+	uint16_t maxSettleMs;
+
+	/* Режим пробного включения 24В после КЗ и его таймер (мс) */
+	uint8_t  probeAfterShort;
+	uint16_t probeTimerMs;
+
+
+	uint16_t maxRetryTimerMs;
+
+	void UpdateLineStateInstant();
+	void UpdateLineStateFiltered();
 
 public:
 	VDeviceDPT(uint8_t ChNum);
 
-	uint8_t GetDT() {return DEVICE_DPT_TYPE;}
+	uint8_t GetDT();
 	void Init();
 	void Process();
 	void CommandCB(uint8_t Command, uint8_t *Parameters);
 	void SetStatus();
 	void Timer1ms();
 
-	/* Вызывается из внешнего кода для установки значений АЦП каналов */
+	/* Вызывается из внешнего кода.
+	 * ch1 — уже пересчитанное сопротивление в Омах,
+	 * ch2 — резерв / отладка.
+	 */
 	void SetAdcValues(uint16_t ch1, uint16_t ch2);
+
+	/* Обновление данных MAX (температура в °C, флаг неисправности). Вызывается из МКУ. */
+	void SetMaxStatus(int16_t temp_c, uint8_t fault);
+
+	/* Функции управления питанием/режимом измерения ДПТ (устанавливаются в MCU_TC/app.cpp) */
+	void (*DPT_SetResMeasureMode)() = nullptr;
+	void (*DPT_SetMaxMeasureMode)() = nullptr;
 
 	/* Получить текущее состояние линии */
 	DeviceDPTLineState GetLineState() const { return LineState; }
