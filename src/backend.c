@@ -2,6 +2,8 @@
 #include "backend.h"
 #include "service.h"
 
+uint8_t isMaster = 0;
+
 uint8_t nDevs = 0;
 Device BoardDevicesList[MAX_DEVS];
 
@@ -20,6 +22,7 @@ tBufMsgObject;
 tBufMsgObject BufSendMsgObj[NumSendMsgObj];
 uint8_t       IndexSendMsgObj = 0;
 uint8_t       IndexSaveMsgObj = 0;
+
 
 /* Счётчик отброшенных сообщений при переполнении очереди (для диагностики) */
 static uint32_t SendOverflowCount = 0;
@@ -108,53 +111,12 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
 	uint8_t dir = MsgID>>28;
 
 
-#if 0
     if(dir == 1) { // посылки от устройств - пересылаем в USB и работа Listener
-    	ListenerCommandCB(MsgID, Buf);
-    	/*
-		USBSndBuf[2] = (uint8_t)(MsgID >> 24);
-		USBSndBuf[3] = (uint8_t)((MsgID >> 16) & 0xFF);
-		USBSndBuf[4] = (uint8_t)((MsgID >> 8) & 0xFF);
-		USBSndBuf[5] = (uint8_t)(MsgID & 0xFF);
-		memcpy(USBSndBuf + 6, MsgData, 8);
-		*((uint16_t *)(USBSndBuf + 14)) = CRC16(USBSndBuf);
-		USBSendData(USBSndBuf);
-    	 */
 		if(isListener) {
-
-
-
-			/*
-			for(i = 0; i < ListenerDevNum; i++)	{
-			    if((((uint16_t)(ui32MsgID & 0x000000FFU) == ListenerDevicesList[i].DT) && ((uint16_t)((ui32MsgID >> 8) & 0x0000FFF0U) == ListenerDevicesList[i].SH)) ||
-			       (((uint16_t)(ui32MsgID & 0x000000FFU) == ListenerDevicesList[i].DT) && (ListenerDevicesList[i].SH == 0))) {
-
-			    	if(ListenerDevicesList[i].SH == 0) {
-			    		ListenerDevicesList[i].SH = (uint16_t)((ui32MsgID >> 8) & 0x0000FFF0U);
-			    	}
-
-			    	uint8_t Command = (uint16_t)((ui32MsgID >> 24) & 0x0000000FU);
-		            switch(Channel) {
-		            	case 0: { // команды
-		            		if(Buf[0] == 0xFF) return;
-		                    uint8_t *pData = &Buf[1];
-		                    CB0(nDevs + i, Buf[0], pData);
-		                } return;
-		            	case 1: { // не слушаем сервисные пакеты
-		            	} return;
-		                default: {
-		                    float Val = htonf(*((float *)(&Buf[4])));
-		                    CB1(nDevs + i, Channel, &Val);
-		                    } return;
-		            }
-			    }
-			}
-			*/
+			ListenerCommandCB(MsgID, Buf);
 		}
-
-		return;
     }
-#endif
+
 	/* Разбор ID по текущему протоколу */
 	can_ext_id_t id;
 	id.ID = MsgID;
@@ -226,42 +188,20 @@ void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t b
     SendMessageFull(can_id, data, Now, bus);
 }
 
-void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus) {
-
+void FireServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
 	switch(Command) {
-		case ServiceCmd_ResetMCU: { // Restart MCU
-			ResetMCU();
+		case ServiceCmd_SetStatusFire: {
+			RcvStatusFire();
 		}break;
-		case ServiceCmd_StopStartSend: { // Stop/Start останавливает очередь на отправку в кан, остаются только принудительные (приоритетные отправки)
-			CanStopSend = MsgData[0];
+		case ServiceCmd_ReplyStatusFire: {
+			RcvReplyStatusFire();
 		}break;
-		case ServiceCmd_StopStartReTranslate: { // Stop/Start останавливает автоматическую ретрансляцию из одного CAN в другой
-			CanStopRetranslate = MsgData[0];
-
+		case ServiceCmd_StartExtinguishment: {
+			RcvStartExtinguishment();
 		}break;
-		case ServicePriorityCmd_CircSetAdr: { // установка адреса по кольцу
-			uint8_t new_adr = MsgData[0];
-
-			SetHAdr(new_adr);
-
-			MsgData[0]++;
-			uint8_t reply_bus;
-			if(bus == BUS_CAN0)
-				reply_bus = BUS_CAN1;
-			else
-				reply_bus = BUS_CAN0;
-			SendAllMessage(Command, MsgData, SEND_NOW, reply_bus);
-		}break;
-
-
-		// Work with config data
-		case ServiceCmd_GetConfigSize:
-		case ServiceCmd_GetConfigCRC:
-		case ServiceCmd_GetConfigWord:
-		case ServiceCmd_SetConfigWord:
-		case ServiceCmd_SaveConfig:
-		case ServiceCmd_DefaultConfig: {
-			ConfigServiceCmd(Dev, Command, MsgData);
+		case ServiceCmd_StopExtinguishment: {
+			RcvStopExtinguishment();
 		}break;
 	}
 }
@@ -328,8 +268,64 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 		case ServiceCmd_SaveConfig: { // save config from local
 			SaveConfig();
 		}break;
-		case ServiceCmd_DefaultConfig: {
+		case ServiceCmd_DefaultConfig: { // restore defaults into local config
 			DefaultConfig();
+		}break;
+		case ServiceCmd_SetSystemTime: {
+			// Установка системного времени реализуется на стороне ППКУ (STM32 RTC),
+			// на МКУ дополнительных действий не требуется.
+		}break;
+	}
+}
+
+void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus) {
+
+	switch(Command) {
+		case ServiceCmd_ResetMCU: { // Restart MCU
+			ResetMCU();
+		}break;
+		case ServiceCmd_StopStartSend: { // Stop/Start останавливает очередь на отправку в кан, остаются только принудительные (приоритетные отправки)
+			CanStopSend = MsgData[0];
+		}break;
+		case ServiceCmd_StopStartReTranslate: { // Stop/Start останавливает автоматическую ретрансляцию из одного CAN в другой
+			CanStopRetranslate = MsgData[0];
+
+		}break;
+		case ServiceCmd_CircSetAdr: { // установка адреса по кольцу
+			if(isMaster == 1)
+				return;
+
+			uint8_t new_adr = MsgData[0];
+
+			SetHAdr(new_adr);
+
+			MsgData[0]++;
+			uint8_t reply_bus;
+			if(bus == BUS_CAN0)
+				reply_bus = BUS_CAN1;
+			else
+				reply_bus = BUS_CAN0;
+			SendAllMessage(Command, MsgData, SEND_NOW, reply_bus);
+		}break;
+		case ServiceCmd_SetSystemTime: {
+			RcvSetSystemTime(MsgData);
+		}break;
+
+		case ServiceCmd_SetStatusFire:
+		case ServiceCmd_ReplyStatusFire:
+		case ServiceCmd_StartExtinguishment:
+		case ServiceCmd_StopExtinguishment: {
+			FireServiceCmd(Dev, Command, MsgData);
+		}break;
+
+		// Work with config data
+		case ServiceCmd_GetConfigSize:
+		case ServiceCmd_GetConfigCRC:
+		case ServiceCmd_GetConfigWord:
+		case ServiceCmd_SetConfigWord:
+		case ServiceCmd_SaveConfig:
+		case ServiceCmd_DefaultConfig: {
+			ConfigServiceCmd(Dev, Command, MsgData);
 		}break;
 	}
 }
@@ -337,6 +333,23 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr) {
 	SavedCfgptr = SConfigPtr; LocalCfgptr = LConfigPtr;
 }
+
+void SetStatusFire(uint8_t *Data) {
+	SendMessage(0, ServiceCmd_SetStatusFire, Data, 1, BUS_CAN12);
+}
+void SetReplyStatusFire() {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+	SendMessage(0, ServiceCmd_ReplyStatusFire, Data, 1, BUS_CAN12);
+}
+void SetStartExtinguishment() {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+	SendMessage(0, ServiceCmd_StartExtinguishment, Data, 1, BUS_CAN12);
+}
+void SetStopExtinguishment() {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+	SendMessage(0, ServiceCmd_StopExtinguishment, Data, 1, BUS_CAN12);
+}
+
 
 /***********************************************************************************************************
  * Оболочка пакета для посылок по другим интерфейсам

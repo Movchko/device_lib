@@ -62,17 +62,24 @@ enum ServiceCmd {
 	ServiceCmd_ResetMCU				= 128,
 	ServiceCmd_StopStartSend		= 129,
 	ServiceCmd_StopStartReTranslate	= 130,
-	ServicePriorityCmd_CircSetAdr 		= 200,
-};
 
-enum ServiceConfigCmd {
+	ServiceCmd_SetStatusFire		= 140,
+	ServiceCmd_ReplyStatusFire		= 141,
+	ServiceCmd_StartExtinguishment 	= 142,
+	ServiceCmd_StopExtinguishment 	= 143,
+
 	ServiceCmd_GetConfigSize 		= 150,
 	ServiceCmd_GetConfigCRC    		= 151,
 	ServiceCmd_GetConfigWord   		= 152,
 	ServiceCmd_SetConfigWord	 	= 153,
 	ServiceCmd_SaveConfig 			= 154,
-	ServiceCmd_DefaultConfig 		= 155
+	ServiceCmd_DefaultConfig 		= 155,
+
+	ServiceCmd_SetSystemTime		= 157,
+
+	ServiceCmd_CircSetAdr 		= 200,
 };
+
 
 // bus - битовая маска - номер шины (0b01 - CAN 0, 0b10 - CAN 1)
 void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus);
@@ -86,12 +93,21 @@ void BackendProcess(); // необходимо вызывать в главно�
  */
 void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t bus);
 void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bus);
-
-void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData);
+void SendAllMessage(uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t bus);
 
 void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr);
 
-uint8_t GetRetranslate();
+uint8_t GetRetranslate(); // вернуть флаг разрешена ли ретрансляция сообщений
+
+void SetStatusFire();
+void SetReplyStatusFire();
+void SetStartExtinguishment();
+void SetStopExtinguishment();
+
+void RcvStatusFire();
+void RcvReplyStatusFire();
+void RcvStartExtinguishment();
+void RcvStopExtinguishment();
 
 // описать в главной программе
 void CANSendData(uint8_t *Buf);
@@ -109,6 +125,7 @@ uint32_t GetID();
 void FlashWriteData(uint8_t *ConfigPtr, uint16_t ConfigSize);
 void ResetMCU();
 void SetHAdr(uint8_t h_adr);
+void RcvSetSystemTime(uint8_t *MsgData);
 
 
 // работа с конфигурацией
