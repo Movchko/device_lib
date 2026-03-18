@@ -82,7 +82,7 @@ enum ServiceCmd {
 
 
 // bus - битовая маска - номер шины (0b01 - CAN 0, 0b10 - CAN 1)
-void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus);
+void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus, uint8_t dir);
 void ProtocolParse(uint32_t ui32MsgID, uint8_t *pui8MsgData, uint8_t bus);
 
 void BackendProcess(); // необходимо вызывать в главной программе. 1000герц
@@ -122,7 +122,7 @@ uint8_t BackendGetDeviceCount(void);
 void CommandCB(uint8_t Dev, uint8_t Command, uint8_t *Parameters);
 void ListenerCommandCB(uint32_t MsgID, uint8_t *MsgData);
 uint32_t GetID();
-void FlashWriteData(uint8_t *ConfigPtr, uint16_t ConfigSize);
+void FlashWriteData(uint8_t *ConfigPtr, uint32_t ConfigSize);
 void ResetMCU();
 void SetHAdr(uint8_t h_adr);
 void RcvSetSystemTime(uint8_t *MsgData);
@@ -130,7 +130,7 @@ void RcvSetSystemTime(uint8_t *MsgData);
 
 // работа с конфигурацией
 void DefaultConfig(); // restore default config
-uint16_t GetConfigSize(); // get config size in  bytes
+uint32_t GetConfigSize(); // get config size in  bytes
 uint32_t GetConfigWord(uint16_t num); // get 4 bytes
 void SetConfigWord(uint16_t num, uint32_t word); // set 4 bytes
 void SaveConfig();

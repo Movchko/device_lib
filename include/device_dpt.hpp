@@ -7,7 +7,7 @@
 
 // в омах
 // всё что выше - обрыв
-#define DPT_LIMIT_BREAK 1500//6200
+#define DPT_LIMIT_BREAK 2000//6200
 //  норма
 #define DPT_LIMIT_NORMAL 820//4100
 // неисправность

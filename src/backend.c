@@ -141,7 +141,7 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
 
     		if(Command >= 128) {
     			uint8_t *pData = &Buf[1];
-    			ServiceCommandParse(0, Command, pData, bus);
+    			ServiceCommandParse(0, Command, pData, bus, dir);
     			return;
     		} else {
                 uint8_t *pData = &Buf[1];
@@ -211,9 +211,11 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 
 	switch(Command) {
 		case ServiceCmd_GetConfigSize: { // Get config size ( bytes)
-			uint16_t sz = GetConfigSize();
-			Data[0] = (sz >> 8 ) & 0xFF;
-			Data[1] = (sz >> 0 ) & 0xFF;
+			uint32_t sz = GetConfigSize();
+			Data[0] = (sz >> 24 ) & 0xFF;
+			Data[1] = (sz >> 16 ) & 0xFF;
+			Data[2] = (sz >> 8 ) & 0xFF;
+			Data[3] = (sz >> 0 ) & 0xFF;
 			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		}break;
 		case ServiceCmd_GetConfigCRC: { // вернуть контрольную сумму массива конфигурации
@@ -278,7 +280,7 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 	}
 }
 
-void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus) {
+void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus, uint8_t dir) {
 
 	switch(Command) {
 		case ServiceCmd_ResetMCU: { // Restart MCU
@@ -325,8 +327,12 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 		case ServiceCmd_SetConfigWord:
 		case ServiceCmd_SaveConfig:
 		case ServiceCmd_DefaultConfig: {
-			ConfigServiceCmd(Dev, Command, MsgData);
+			if(dir & (Dev == 0)) // если от нас и нам, то исключаем (кольцо)
+				return;
+			else
+				ConfigServiceCmd(Dev, Command, MsgData);
 		}break;
+
 	}
 }
 

@@ -42,7 +42,7 @@ typedef struct {
 typedef struct {
 	uint32_t magic;   // сигнатура
 	uint16_t version; // версия формата
-	uint16_t size;    // размер полезной части (PPKYCfg) в байтах
+	uint32_t size;    // размер полезной части (PPKYCfg) в байтах
 } PPKYConfigHeader;
 
 
