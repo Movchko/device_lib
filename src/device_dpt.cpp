@@ -94,7 +94,7 @@ void VDeviceDPT::Process() {
 
 void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 	switch(Command) {
-		case 2: {
+		case 12: {
 			/* Установка порога MAX (°C) (младший байт, старший байт) */
 			if (Config != nullptr && Parameters != nullptr) {
 				uint16_t threshold = Parameters[0] | (Parameters[1] << 8);
@@ -109,7 +109,7 @@ void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 			}
 		} break;
 
-		case 3: {
+		case 13: {
 			/* Установка времени стабилизации уровня (младший байт, старший байт), мс */
 			if (Config != nullptr && Parameters != nullptr) {
 				uint16_t threshold = Parameters[0] | (Parameters[1] << 8);
@@ -124,7 +124,7 @@ void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 			}
 		} break;
 
-		case 4: {
+		case 14: {
 			/* Установка режима устройства (0=DPT,1=Limit,2=Button) */
 			if (Config != nullptr && Parameters != nullptr) {
 				uint8_t mode = Parameters[0];

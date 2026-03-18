@@ -144,6 +144,7 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
     			ServiceCommandParse(0, Command, pData, bus, dir);
     			return;
     		} else {
+    			if(dir == 1) return;
                 uint8_t *pData = &Buf[1];
                 CommandCB(i, Command, pData);
                 if(isBroadcast) // если broadcast, цикл пройдёт по другим устройствам (массовая остановка и т.п.)

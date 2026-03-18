@@ -134,7 +134,7 @@ void VDeviceIgniter::Process() {
 
 void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 	switch(Command) {
-		case 0: {
+		case 10: {
 			if ((State == DeviceIgniterState_Idle) || (State == DeviceIgniterState_Error)) {
 				if (LineState == DeviceIgniterLineState_Break) {
 					State = DeviceIgniterState_Error;
@@ -161,7 +161,7 @@ void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 			}
 		} break;
 
-		case 1: {
+		case 11: {
 			uint8_t val = Parameters[0] ? 1 : 0;
 			disable_sc_check = val;
 			if (Config != nullptr) {
@@ -177,7 +177,7 @@ void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 		 * Parameters[2,3] = threshold_break_high LE
 		 * Parameters[4]   = burn_retry_count (0 или 1)
 		 */
-		case 2: {
+		case 12: {
 			if (Parameters != nullptr) {
 				uint16_t bl = (uint16_t)Parameters[0] | ((uint16_t)Parameters[1] << 8);
 				uint16_t bh = (uint16_t)Parameters[2] | ((uint16_t)Parameters[3] << 8);
