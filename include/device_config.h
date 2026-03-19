@@ -64,7 +64,8 @@ typedef struct PPKYCfg {
 	UniqId	UId;
 
 	uint8_t beep;
-	uint8_t _pad[3];  /* явное выравнивание под CfgDevices (offset 36), заменяет reserv — итого 40356 */
+	uint8_t fire_mode; // режим тушения 0 - автоматический, 1 - автономный, 2 - ручной
+	uint8_t _pad[2];  /* явное выравнивание под CfgDevices (offset 36), заменяет reserv  */
 
 	MKUCfg	CfgDevices[32];
 
