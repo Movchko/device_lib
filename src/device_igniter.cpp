@@ -22,6 +22,7 @@ VDeviceIgniter::VDeviceIgniter(uint8_t ChNum) : VDevice(ChNum) {
 	burn_retry_count = 1;
 	run_elapsed_ms = 0;
 	pwm_value = 0;
+	measured_resistance_ohm = 0;
 	start_ack = 0;
 	end_ack = 0;
 	burn_phase = 0;
@@ -64,6 +65,7 @@ void VDeviceIgniter::Init() {
 	LineState = DeviceIgniterLineState_Normal;
 	run_elapsed_ms = 0;
 	pwm_value = 0;
+	measured_resistance_ohm = 0;
 	start_ack = 0;
 	end_ack = 0;
 	burn_phase = 0;
@@ -80,6 +82,8 @@ bool VDeviceIgniter::IsPwmActive() const {
 }
 
 void VDeviceIgniter::UpdateLineFromAdcMv(uint16_t adc_mv) {
+	/* Передаём текущее измеренное значение линии в статус (2 байта). */
+	measured_resistance_ohm = adc_mv;
 	if (IsPwmActive()) {
 		return;  /* во время работы ШИМ значения АЦП невалидны */
 	}
@@ -205,6 +209,8 @@ void VDeviceIgniter::SetStatus() {
 	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
 	Data[0] = (uint8_t)LineState;
 	Data[1] = (start_ack ? 0x01 : 0x00) | (end_ack ? 0x02 : 0x00);
+	Data[2] = (uint8_t)(measured_resistance_ohm & 0xFFu);
+	Data[3] = (uint8_t)((measured_resistance_ohm >> 8) & 0xFFu);
 	VDeviceSetStatus(Num, Status, Data);
 }
 

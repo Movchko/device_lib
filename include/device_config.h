@@ -122,6 +122,23 @@ typedef struct DeviceIgniterConfig {
 	uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 6];
 } DeviceIgniterConfig;
 
+typedef struct DeviceRelayConfig {
+	/* Начальное состояние реле после Init:
+	 * 0 - выключено, 1 - включено */
+	uint8_t initial_state;
+
+	/* Инверсия обратной связи:
+	 * 0 - feedback 1 означает "включено"
+	 * 1 - feedback 0 означает "включено" */
+	uint8_t feedback_inverted;
+
+	/* Время ожидания установления обратной связи после переключения, мс */
+	uint16_t settle_time_ms;
+
+	/* резерв */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 4];
+} DeviceRelayConfig;
+
 
 
 #ifdef __cplusplus

@@ -348,8 +348,8 @@ void SetReplyStatusFire() {
 	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
 	SendMessage(0, ServiceCmd_ReplyStatusFire, Data, 1, BUS_CAN12);
 }
-void SetStartExtinguishment() {
-	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+void SetStartExtinguishment(uint8_t zone) {
+	uint8_t Data[7] = {zone, 0, 0, 0, 0, 0, 0};
 	SendMessage(0, ServiceCmd_StartExtinguishment, Data, 1, BUS_CAN12);
 }
 void SetStopExtinguishment() {

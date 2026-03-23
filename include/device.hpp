@@ -22,6 +22,12 @@ extern "C" {
 
 #define DEVICE_BUTTON_TYPE 15
 #define DEVICE_LSWITCH_TYPE 16
+#define DEVICE_RELAY_TYPE 17
+
+#define DEVICE_MCU_K1 20
+#define DEVICE_MCU_K2 21
+#define DEVICE_MCU_K3 22
+#define DEVICE_MCU_KR 23
 
 enum DeviceState {
 	DeviceState_Idle,
@@ -38,12 +44,18 @@ enum DType {
 	DT_IGN = DEVICE_IGNITER_TYPE,  /* Спичка  */
 	DT_BUT = DEVICE_BUTTON_TYPE, /* Кнопка на базе ДПТ */
 	DT_LSW = DEVICE_LSWITCH_TYPE, /* концевик на базе дпт */
+	DT_REL = DEVICE_RELAY_TYPE, /* реле */
 
 
 	/* физические платы */
 	DT_PPKY  = DEVICE_PPKY_TYPE, /* БСУ (ППКУ) */
 	DT_MCU_IGN = DEVICE_MCU_IGN_TYPE, /* МКУ с 1 пускателем и 1 ДПТ*/
 	DT_MCU_TC = DEVICE_MCU_TC_TYPE, /* МКУ с 1 дпт (с MAX) */
+
+	DT_MCU_K1 = DEVICE_MCU_K1, /* МКУ с 2 пускателями и 1 ДПТ (с MAX)*/
+	DT_MCU_K2 = DEVICE_MCU_K2, /* МКУ  с 3 пускателями */
+	DT_MCU_K3 = DEVICE_MCU_K3, /* МКУ  с 2 концевиками и 1 пускателем*/
+	DT_MCU_KR = DEVICE_MCU_KR, /* МКУ  с 2 реле*/
 };
 
 

@@ -60,6 +60,8 @@ class VDeviceIgniter: public VDevice {
 
 	/* текущий уровень ШИМ (0..PWM_MAX) */
 	uint16_t pwm_value;
+	/* текущее измеренное значение линии (2 байта в статусе) */
+	uint16_t measured_resistance_ohm;
 
 	/* флаги подтверждений */
 	uint8_t start_ack;

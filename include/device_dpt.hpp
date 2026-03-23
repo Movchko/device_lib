@@ -66,6 +66,7 @@ class VDeviceDPT: public VDevice {
 	/* Данные MAX: последняя температура и флаг неисправности */
 	int16_t max_temp_c;
 	uint8_t max_fault;
+	int16_t max_internal_temp_c;
 
 	/* Текущие значения АЦП каналов */
 	uint16_t adc_ch1_value;
@@ -112,8 +113,8 @@ public:
 	 */
 	void SetAdcValues(uint16_t ch1, uint16_t ch2);
 
-	/* Обновление данных MAX (температура в °C, флаг неисправности). Вызывается из МКУ. */
-	void SetMaxStatus(int16_t temp_c, uint8_t fault);
+	/* Обновление данных MAX (термопара, битовая маска fault, внутренняя температура). */
+	void SetMaxStatus(int16_t temp_c, uint8_t fault_mask, int16_t internal_temp_c);
 
 	/* Функции управления питанием/режимом измерения ДПТ (устанавливаются в MCU_TC/app.cpp) */
 	void (*DPT_SetResMeasureMode)() = nullptr;

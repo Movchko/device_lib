@@ -2,6 +2,13 @@
 #include <device_dpt.hpp>
 #include <string.h>
 
+/* Временно отключаем влияние max_fault на классификацию линии.
+ * 0 - игнорировать max_fault в логике (но передавать в статусе)
+ * 1 - учитывать max_fault как DeviceDPTLineState_Fault */
+#ifndef DPT_USE_MAX_FAULT_IN_LOGIC
+#define DPT_USE_MAX_FAULT_IN_LOGIC 0
+#endif
+
 VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
 	State = DeviceDPTState_Idle;
 	Status = DeviceDPTStatus_Idle;
@@ -18,6 +25,7 @@ VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
 	pendingTimeMs = 0;
 	max_temp_c = 0;
 	max_fault = 0;
+	max_internal_temp_c = 0;
 	measureModeIsMax = 0;
 	useMax = 0;
 	maxRetryTimerMs = 0;
@@ -71,6 +79,7 @@ void VDeviceDPT::Init() {
 	adc_ch2_value = 0;
 	measured_resistance_ohm = 0;
 	measureModeIsMax = 0;
+	max_internal_temp_c = 0;
 	maxRetryTimerMs = 0;
 	maxSettleMs = 0;
 	probeAfterShort = 0;
@@ -99,8 +108,7 @@ void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 			if (Config != nullptr && Parameters != nullptr) {
 				uint16_t threshold = Parameters[0] | (Parameters[1] << 8);
 				if (threshold > 0) {
-					Config->reserved[1] = static_cast<uint8_t>(threshold & 0xFFu);
-					Config->reserved[2] = static_cast<uint8_t>((threshold >> 8) & 0xFFu);
+					Config->max_fire_threshold_c = threshold;
 					max_fire_threshold_c = threshold;
 					if (VDeviceSaveCfg != nullptr) {
 						VDeviceSaveCfg();
@@ -114,8 +122,7 @@ void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 			if (Config != nullptr && Parameters != nullptr) {
 				uint16_t threshold = Parameters[0] | (Parameters[1] << 8);
 				if (threshold > 0) {
-					Config->reserved[3] = static_cast<uint8_t>(threshold & 0xFFu);
-					Config->reserved[4] = static_cast<uint8_t>((threshold >> 8) & 0xFFu);
+					Config->state_change_delay_ms = threshold;
 					state_change_delay_ms = threshold;
 					if (VDeviceSaveCfg != nullptr) {
 						VDeviceSaveCfg();
@@ -129,7 +136,7 @@ void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 			if (Config != nullptr && Parameters != nullptr) {
 				uint8_t mode = Parameters[0];
 				if (mode <= DeviceDPTMode_Button) {
-					Config->reserved[0] = mode;
+					Config->mode = mode;
 					Mode = static_cast<DeviceDPTMode>(mode);
 					if (VDeviceSaveCfg != nullptr) {
 						VDeviceSaveCfg();
@@ -166,9 +173,12 @@ void VDeviceDPT::SetStatus() {
 	Data[2] = (measured_resistance_ohm >> 8) & 0xFF;
 
 
-	/* Data[3..4] -  */
+	/* Data[3] - температура термопары MAX (int8)
+	 * Data[4] - fault bitmask MAX
+	 * Data[5] - внутренняя температура MAX (int8) */
 	Data[3] = max_temp_c & 0xFF;
 	Data[4] = max_fault & 0xFF;
+	Data[5] = max_internal_temp_c & 0xFF;
 
 	if (VDeviceSetStatus != nullptr) {
 		VDeviceSetStatus(Num, Status, Data);
@@ -305,9 +315,10 @@ void VDeviceDPT::SetAdcValues(uint16_t ch1, uint16_t ch2) {
 	UpdateLineStateFiltered();
 }
 
-void VDeviceDPT::SetMaxStatus(int16_t temp_c, uint8_t fault) {
+void VDeviceDPT::SetMaxStatus(int16_t temp_c, uint8_t fault, int16_t internal_temp_c) {
 	max_temp_c = temp_c;
-	max_fault = fault ? 1u : 0u;
+	max_fault = fault;
+	max_internal_temp_c = internal_temp_c;
 	/* В режиме MAX классификация состояния идёт по данным MAX */
 	if (measureModeIsMax) {
 		UpdateLineStateFiltered();
@@ -323,20 +334,17 @@ void VDeviceDPT::UpdateLineStateInstant() {
 		} else if (r >= DPT_LIMIT_NORMAL) {
 			LineState = DeviceDPTLineState_Normal;
 		} else if (r >= DPT_LIMIT_FAULT) {
-			/* Неисправность линии */
 			LineState = DeviceDPTLineState_Fault;
 		} else if (r >= DPT_LIMIT_FIRE) {
-			/* Событие: трактуем по режиму */
-			if (Mode == DeviceDPTMode_DPT) {
-				LineState = DeviceDPTLineState_Fire;
+			/* Для DPT с MAX: пожар только по превышению температуры MAX.
+			 * Поэтому в режиме сопротивления не выставляем Fire. */
+			if (Mode == DeviceDPTMode_DPT && useMax) {
+				LineState = DeviceDPTLineState_Short;
 			} else {
-				LineState = DeviceDPTLineState_Press;
+				LineState = (Mode == DeviceDPTMode_DPT) ? DeviceDPTLineState_Fire
+				                                         : DeviceDPTLineState_Press;
 			}
 		} else {
-			/* 0..DPT_LIMIT_FIRE — КЗ.
-			 * Дальнейшая реакция (отключение 24В, переход на MAX и циклы 3 с)
-			 * реализуется в Timer1ms через prevLineState/measureModeIsMax/useMax.
-			 */
 			LineState = DeviceDPTLineState_Short;
 		}
 	} else {
@@ -345,13 +353,13 @@ void VDeviceDPT::UpdateLineStateInstant() {
 		 * !fault && T>порог → пожар
 		 * иначе             → КЗ без пожара
 		 */
-		if (max_fault) {
+		if (DPT_USE_MAX_FAULT_IN_LOGIC && max_fault) {
 			LineState = DeviceDPTLineState_Fault;
-		} else
-			if (max_temp_c > static_cast<int16_t>(max_fire_threshold_c)) {
-				LineState = DeviceDPTLineState_Fire;
-			} else
-				LineState = DeviceDPTLineState_Short;
+		} else if (max_temp_c > static_cast<int16_t>(max_fire_threshold_c)) {
+			LineState = (Mode == DeviceDPTMode_DPT) ? DeviceDPTLineState_Fire : DeviceDPTLineState_Press;
+		} else {
+			LineState = DeviceDPTLineState_Short;
+		}
 	}
 }
 
