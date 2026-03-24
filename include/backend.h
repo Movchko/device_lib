@@ -157,6 +157,7 @@ void SaveConfig();
 #define BSU_PKT_PREAMBLE_HI  0xAAu
 
 #define BSU_PKT_TYPE_CAN     0u
+#define BSU_PKT_TYPE_CAN2    1u
 
 #define BSU_PKT_HEADER_SIZE  (2u + 2u + 2u + 2u)  /* preamble + size + type + seq */
 #define BSU_PKT_CAN_PAYLOAD  (4u + 8u)           /* id + data */

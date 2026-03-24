@@ -6,7 +6,7 @@
  * 0 - игнорировать max_fault в логике (но передавать в статусе)
  * 1 - учитывать max_fault как DeviceDPTLineState_Fault */
 #ifndef DPT_USE_MAX_FAULT_IN_LOGIC
-#define DPT_USE_MAX_FAULT_IN_LOGIC 0
+#define DPT_USE_MAX_FAULT_IN_LOGIC 1
 #endif
 
 VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
