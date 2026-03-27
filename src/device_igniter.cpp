@@ -139,6 +139,16 @@ void VDeviceIgniter::Process() {
 void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 	switch(Command) {
 		case 10: {
+			State = DeviceIgniterState_Run;
+			Status = DeviceIgniterStatus_Run;
+			run_elapsed_ms = 0;
+			pwm_value = 0;
+			burn_phase = BURN_PHASE_RAMP;
+			burn_cycle = 0;
+			start_ack = 1;
+			end_ack = 0;
+			UpdateStatus(Status);
+#if 0
 			if ((State == DeviceIgniterState_Idle) || (State == DeviceIgniterState_Error)) {
 				if (LineState == DeviceIgniterLineState_Break) {
 					State = DeviceIgniterState_Error;
@@ -163,6 +173,7 @@ void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 				end_ack = 0;
 				UpdateStatus(Status);
 			}
+#endif
 		} break;
 
 		case 11: {

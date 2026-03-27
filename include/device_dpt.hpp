@@ -16,6 +16,8 @@
 #define DPT_LIMIT_FIRE 100//560
 //  КЗ
 
+#define TRY_24V_SHORT_MS 5000
+
 enum DeviceDPTState {
 	DeviceDPTState_Idle,
 	DeviceDPTState_Error
@@ -93,6 +95,8 @@ class VDeviceDPT: public VDevice {
 
 
 	uint16_t maxRetryTimerMs;
+
+	uint8_t was_fire; // был пожар
 
 	void UpdateLineStateInstant();
 	void UpdateLineStateFiltered();

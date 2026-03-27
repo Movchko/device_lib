@@ -2,32 +2,13 @@
 #ifndef INCLUDE_DEVICE_CONFIG_H_
 #define INCLUDE_DEVICE_CONFIG_H_
 
-#ifdef __cplusplus
-#include "device.hpp"
-#endif
+#include "device_cfg_common.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 #include "backend.h"
-
-#ifdef __cplusplus
-/* VDeviceCfg, VDEVICE_CFG_SIZE, DEVICE_* — из device.hpp */
-#else
-/* C-режим: device.hpp не подключаем, определяем сами */
-#define VDEVICE_CFG_SIZE  64
-#define DEVICE_PPKY_TYPE    10
-#define DEVICE_IGNITER_TYPE 11
-#define DEVICE_DPT_TYPE     12
-#define DEVICE_MCU_IGN_TYPE 13
-#define DEVICE_MCU_TC_TYPE  14
-
-typedef struct {
-	uint32_t type;   /* 4 байта, как DType в C++ */
-	uint8_t reserv[VDEVICE_CFG_SIZE - 4];  /* итого 64, кратно 4 */
-} VDeviceCfg;
-#endif
 //PPKY
 //#define PPKY_CONFIG_SIZE 0x100000 // 1мб &!&!&!&!&!!&
 

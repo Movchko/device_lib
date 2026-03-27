@@ -12,7 +12,8 @@ bool isListener = false;
 uint8_t ListenerDevNum = 0;
 
 bool isCanActive = false;
-uint8_t send_delay = 0;
+uint8_t send_delay = 0; // задержка между пакетами
+uint32_t start_delay = 0; // задержка появления устройства на шине
 typedef struct {
     uint32_t ui32MsgID;
     uint8_t pui8MsgData[8];
@@ -50,6 +51,26 @@ uint8_t BackendGetDeviceCount(void) {
 uint8_t *SavedCfgptr; // указатель на сохранённый массив конфигурации
 uint8_t *LocalCfgptr; // указатель на локальный (временный) массив конфигурации
 
+__attribute__((weak)) uint8_t SetUpdateWord(uint32_t num, uint32_t word) {
+	(void)num;
+	(void)word;
+	return 0;
+}
+
+__attribute__((weak)) uint8_t GetUpdateWord(uint32_t num, uint32_t *word) {
+	(void)num;
+	(void)word;
+	return 0;
+}
+
+__attribute__((weak)) uint8_t FinishUpdateTransmit(void) {
+	return 0;
+}
+
+__attribute__((weak)) uint32_t GetAppVersion(void) {
+	return 0;
+}
+
 
 
 void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bus) {
@@ -82,24 +103,23 @@ void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bu
 
 void BackendProcess() {
 
+	//TODO:: здесь задержка запуска устройства в шине
+	if(start_delay < (BoardDevicesList[0].h_adr * 30)) {
+		start_delay++;
+		return;
+	}
 
 	/* отправка сообщений в кан из циклического буфера, 1 сообщение каждые SEND_DELAY_MS*/
 	if(CanStopSend == 1)
 		return;
-	else
-		send_delay++;
 
-    if(send_delay > SEND_DELAY_MS) {
-    	send_delay = 0;
+	if (IndexSaveMsgObj != IndexSendMsgObj) {
+		CANSendData((uint8_t *)&BufSendMsgObj[IndexSendMsgObj]);
+		IndexSendMsgObj++;
+		if (IndexSendMsgObj >= NumSendMsgObj)
+			IndexSendMsgObj = 0;
+	}
 
-		if (IndexSaveMsgObj != IndexSendMsgObj) {
-			CANSendData((uint8_t *)&BufSendMsgObj[IndexSendMsgObj]);
-
-			IndexSendMsgObj++;
-			if (IndexSendMsgObj >= NumSendMsgObj)
-				IndexSendMsgObj = 0;
-		}
-    }
 }
 
 void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
@@ -281,6 +301,55 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 	}
 }
 
+static void UpdateServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+
+	switch(Command) {
+		case ServiceCmd_SetUpdateWord: {
+			uint32_t num_word = 0;
+			num_word |= ((uint32_t)MsgData[0] << 16);
+			num_word |= ((uint32_t)MsgData[1] << 8);
+			num_word |= ((uint32_t)MsgData[2] << 0);
+
+			uint32_t word = 0;
+			for(uint8_t i = 0; i < 4; i++) {
+				word <<= 8;
+				word |= MsgData[3 + i];
+			}
+
+			if(SetUpdateWord(num_word, word)) {
+				/*
+				uint32_t check_word = 0;
+				if(GetUpdateWord(num_word, &check_word) && (check_word == word)) {
+					Data[0] = MsgData[0];
+					Data[1] = MsgData[1];
+					Data[2] = MsgData[2];
+					for(uint8_t i = 0; i < 4; i++) {
+						Data[i + 3] = (check_word >> (24 - 8 * i)) & 0xFF;
+					}
+					SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
+				}*/
+			}
+		}break;
+		case ServiceCmd_UpdateTransmit: {
+			(void)FinishUpdateTransmit();
+		}break;
+	}
+}
+
+static void VersionServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
+	(void)MsgData;
+	if (Command == ServiceCmd_GetVersion) {
+		uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+		uint32_t ver = GetAppVersion();
+		Data[0] = (uint8_t)((ver >> 24) & 0xFF);
+		Data[1] = (uint8_t)((ver >> 16) & 0xFF);
+		Data[2] = (uint8_t)((ver >> 8) & 0xFF);
+		Data[3] = (uint8_t)(ver & 0xFF);
+		SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
+	}
+}
+
 void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus, uint8_t dir) {
 
 	switch(Command) {
@@ -332,6 +401,19 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 				return;
 			else
 				ConfigServiceCmd(Dev, Command, MsgData);
+		}break;
+		case ServiceCmd_SetUpdateWord:
+		case ServiceCmd_UpdateTransmit: {
+			if(dir & (Dev == 0)) // если от нас и нам, то исключаем (кольцо)
+				return;
+			else
+				UpdateServiceCmd(Dev, Command, MsgData);
+		}break;
+		case ServiceCmd_GetVersion: {
+			if(dir & (Dev == 0)) // если от нас и нам, то исключаем (кольцо)
+				return;
+			else
+				VersionServiceCmd(Dev, Command, MsgData);
 		}break;
 
 	}

@@ -6,7 +6,7 @@
  * 0 - игнорировать max_fault в логике (но передавать в статусе)
  * 1 - учитывать max_fault как DeviceDPTLineState_Fault */
 #ifndef DPT_USE_MAX_FAULT_IN_LOGIC
-#define DPT_USE_MAX_FAULT_IN_LOGIC 1
+#define DPT_USE_MAX_FAULT_IN_LOGIC 0
 #endif
 
 VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
@@ -32,6 +32,7 @@ VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
 	maxSettleMs = 0;
 	probeAfterShort = 0;
 	probeTimerMs = 0;
+	was_fire = 0;
 }
 
 void VDeviceDPT::Init() {
@@ -159,6 +160,15 @@ void VDeviceDPT::UpdateStatus(DeviceDPTStatus status) {
 void VDeviceDPT::SetStatus() {
 	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
 
+	// если был пожар, не убираем статус пожара до перезагрузки
+	if(was_fire)
+		LineState = DeviceDPTLineState_Fire;
+
+	if(LineState == DeviceDPTLineState_Fire)
+		was_fire = 1;
+
+
+
 	/* Data[0] - состояние линии:
 	 * 0 - Норма
 	 * 1 - Обрыв
@@ -166,6 +176,7 @@ void VDeviceDPT::SetStatus() {
 	 * 3 - Пожар
 	 * 4 - Нажатие (режим концевика)
 	 */
+
 	Data[0] = LineState;
 
 	/* Data[1..2] - измеренное сопротивление (младший байт, старший байт), Ом */
@@ -226,7 +237,7 @@ void VDeviceDPT::Timer1ms() {
                 }
             }
 
-            if (maxRetryTimerMs < 3000u) {
+            if (maxRetryTimerMs < TRY_24V_SHORT_MS) {
                 maxRetryTimerMs++;
             } else {
                 /* Каждые 3 секунды пробуем снова подать 24В и измерить сопротивление */
@@ -278,7 +289,7 @@ void VDeviceDPT::Timer1ms() {
                 }
             } else {
                 /* Линия по-прежнему считается КЗ → раз в 3 с пробуем включить 24В и померить R */
-                if (maxRetryTimerMs < 3000u) {
+                if (maxRetryTimerMs < TRY_24V_SHORT_MS) {
                     maxRetryTimerMs++;
                 } else {
                     maxRetryTimerMs = 0;
@@ -364,6 +375,7 @@ void VDeviceDPT::UpdateLineStateInstant() {
 }
 
 void VDeviceDPT::UpdateLineStateFiltered() {
+
 	/* Кандидат в новое состояние по текущему измерению */
 	UpdateLineStateInstant();
 	DeviceDPTLineState candidate = LineState;

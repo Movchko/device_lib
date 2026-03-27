@@ -9,25 +9,8 @@ extern "C" {
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include "device_cfg_common.h"
 
-#define VDEVICE_CFG_SIZE 64 // байт
-
-#define DEVICE_PPKY_TYPE 10
-
-#define DEVICE_IGNITER_TYPE 11
-#define DEVICE_DPT_TYPE 12
-
-#define DEVICE_MCU_IGN_TYPE 13
-#define DEVICE_MCU_TC_TYPE 14
-
-#define DEVICE_BUTTON_TYPE 15
-#define DEVICE_LSWITCH_TYPE 16
-#define DEVICE_RELAY_TYPE 17
-
-#define DEVICE_MCU_K1 20
-#define DEVICE_MCU_K2 21
-#define DEVICE_MCU_K3 22
-#define DEVICE_MCU_KR 23
 
 enum DeviceState {
 	DeviceState_Idle,
@@ -58,12 +41,6 @@ enum DType {
 	DT_MCU_KR = DEVICE_MCU_KR, /* МКУ  с 2 реле*/
 };
 
-
-struct VDeviceCfg {
-	// здесь нет параметров, резервируется под устройство
-	/* резерв: размер кратен 4*/
-	uint8_t reserv[VDEVICE_CFG_SIZE];
-};  /* sizeof = VDEVICE_CFG_SIZE = 64*/
 
 
 #ifdef __cplusplus

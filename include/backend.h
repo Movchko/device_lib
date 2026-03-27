@@ -74,8 +74,13 @@ enum ServiceCmd {
 	ServiceCmd_SetConfigWord	 	= 153,
 	ServiceCmd_SaveConfig 			= 154,
 	ServiceCmd_DefaultConfig 		= 155,
+	ServiceCmd_SetUpdateWord        = 156,
 
 	ServiceCmd_SetSystemTime		= 157,
+	ServiceCmd_UpdateTransmit       = 158,
+	ServiceCmd_GetVersion           = 159,
+
+
 
 	ServiceCmd_CircSetAdr 		= 200,
 };
@@ -99,7 +104,7 @@ void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr);
 
 uint8_t GetRetranslate(); // вернуть флаг разрешена ли ретрансляция сообщений
 
-void SetStatusFire();
+void SetStatusFire(uint8_t *Data);
 void SetReplyStatusFire();
 void SetStartExtinguishment(uint8_t zone);
 void SetStopExtinguishment();
@@ -135,6 +140,12 @@ uint32_t GetConfigWord(uint16_t num); // get 4 bytes
 void SetConfigWord(uint16_t num, uint32_t word); // set 4 bytes
 void SaveConfig();
 // выше функции описанныеы в главной программе
+
+// работа с удаленным обновлением прошивки
+uint8_t SetUpdateWord(uint32_t num, uint32_t word);                 // записать 4-байтное слово обновления
+uint8_t GetUpdateWord(uint32_t num, uint32_t *word);                // прочитать записанное слово (для валидации)
+uint8_t FinishUpdateTransmit(void);                                  // финализация/дозапись, затем перезагрузка
+uint32_t GetAppVersion(void);                                        // версия приложения (4 байта)
 
 
 
