@@ -105,13 +105,13 @@ void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr);
 uint8_t GetRetranslate(); // вернуть флаг разрешена ли ретрансляция сообщений
 
 void SetStatusFire(uint8_t *Data);
-void SetReplyStatusFire();
-void SetStartExtinguishment(uint8_t zone);
+void SetReplyStatusFire(uint8_t zone);
+void SetStartExtinguishment(uint8_t zone, uint8_t zone_delay, uint8_t module_delay);
 void SetStopExtinguishment();
 
 void RcvStatusFire();
 void RcvReplyStatusFire();
-void RcvStartExtinguishment();
+void RcvStartExtinguishment(uint8_t *MsgData);
 void RcvStopExtinguishment();
 
 // описать в главной программе

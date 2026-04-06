@@ -51,27 +51,6 @@ uint8_t BackendGetDeviceCount(void) {
 uint8_t *SavedCfgptr; // указатель на сохранённый массив конфигурации
 uint8_t *LocalCfgptr; // указатель на локальный (временный) массив конфигурации
 
-__attribute__((weak)) uint8_t SetUpdateWord(uint32_t num, uint32_t word) {
-	(void)num;
-	(void)word;
-	return 0;
-}
-
-__attribute__((weak)) uint8_t GetUpdateWord(uint32_t num, uint32_t *word) {
-	(void)num;
-	(void)word;
-	return 0;
-}
-
-__attribute__((weak)) uint8_t FinishUpdateTransmit(void) {
-	return 0;
-}
-
-__attribute__((weak)) uint32_t GetAppVersion(void) {
-	return 0;
-}
-
-
 
 void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bus) {
     if (Now) {
@@ -219,7 +198,7 @@ void FireServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 			RcvReplyStatusFire();
 		}break;
 		case ServiceCmd_StartExtinguishment: {
-			RcvStartExtinguishment();
+			RcvStartExtinguishment(MsgData);
 		}break;
 		case ServiceCmd_StopExtinguishment: {
 			RcvStopExtinguishment();
@@ -426,12 +405,12 @@ void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr) {
 void SetStatusFire(uint8_t *Data) {
 	SendMessage(0, ServiceCmd_SetStatusFire, Data, 1, BUS_CAN12);
 }
-void SetReplyStatusFire() {
-	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+void SetReplyStatusFire(uint8_t zone) {
+	uint8_t Data[7] = {zone, 0, 0, 0, 0, 0, 0};
 	SendMessage(0, ServiceCmd_ReplyStatusFire, Data, 1, BUS_CAN12);
 }
-void SetStartExtinguishment(uint8_t zone) {
-	uint8_t Data[7] = {zone, 0, 0, 0, 0, 0, 0};
+void SetStartExtinguishment(uint8_t zone, uint8_t zone_delay, uint8_t module_delay) {
+	uint8_t Data[7] = {zone, zone_delay, module_delay, 0, 0, 0, 0};
 	SendMessage(0, ServiceCmd_StartExtinguishment, Data, 1, BUS_CAN12);
 }
 void SetStopExtinguishment() {

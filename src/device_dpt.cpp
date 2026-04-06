@@ -187,7 +187,10 @@ void VDeviceDPT::SetStatus() {
 	/* Data[3] - температура термопары MAX (int8)
 	 * Data[4] - fault bitmask MAX
 	 * Data[5] - внутренняя температура MAX (int8) */
-	Data[3] = max_temp_c & 0xFF;
+	if(max_temp_c > 0xff)
+		Data[3] = 0xff;
+	else
+		Data[3] = max_temp_c & 0xFF;
 	Data[4] = max_fault & 0xFF;
 	Data[5] = max_internal_temp_c & 0xFF;
 
