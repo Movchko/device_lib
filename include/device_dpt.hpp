@@ -5,6 +5,8 @@
 #include "device.hpp"
 #include "device_config.h"
 
+// пороги ниже при стабилитроне 4.3В при напряжении 24В
+
 // в омах
 // всё что выше - обрыв
 #define DPT_LIMIT_BREAK 2000//6200
@@ -38,6 +40,12 @@ enum DeviceDPTLineState {
 	DeviceDPTLineState_Fault  = 5   /* Неисправность */
 };
 
+/* Legacy-режим (исторически использовался одним классом для DPT/концевика/кнопки).
+ * Теперь VDeviceDPT работает как "чистый ДПТ"; значения оставлены для совместимости config/tools.
+ * 0 - ДПТ
+ * 1 - концевик
+ * 2 - кнопка
+ */
 /* Режим работы виртуального устройства:
  * 0 - ДПТ (пожар)
  * 1 - концевик (открытие)
@@ -100,6 +108,9 @@ class VDeviceDPT: public VDevice {
 
 	void UpdateLineStateInstant();
 	void UpdateLineStateFiltered();
+protected:
+	/* Как интерпретировать "сработку" уровня (по умолчанию для DPT = Fire). */
+	virtual DeviceDPTLineState GetTriggeredLineState() const;
 
 public:
 	VDeviceDPT(uint8_t ChNum);

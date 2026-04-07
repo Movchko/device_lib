@@ -128,9 +128,9 @@ void VDeviceIgniter::Process() {
 		case DeviceIgniterState_Run: {
 			/* Во время разгона и удержания — реакция на обрыв/КЗ как ошибка.
 			 * Только в первом цикле (burn_cycle==0): в повторах линия уже может быть оборвана. */
-			if ((burn_phase == BURN_PHASE_RAMP || burn_phase == BURN_PHASE_HOLD) && burn_cycle == 0) {
-				HandleLineState();
-			}
+			//if ((burn_phase == BURN_PHASE_RAMP || burn_phase == BURN_PHASE_HOLD) && burn_cycle == 0) {
+			//	HandleLineState();
+			//}
 			UpdatePwm();
 		} break;
 	}
@@ -279,9 +279,9 @@ void VDeviceIgniter::UpdatePwm() {
 	if (State != DeviceIgniterState_Run) {
 		return;
 	}
-	if (LineState != DeviceIgniterLineState_Normal) {
-		return;
-	}
+	//if (LineState != DeviceIgniterLineState_Normal) { // <<<< потом вернуть
+	//	return;
+	//}
 
 	const uint16_t PWM_MAX = 99;
 

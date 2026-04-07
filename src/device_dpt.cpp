@@ -35,6 +35,10 @@ VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
 	was_fire = 0;
 }
 
+DeviceDPTLineState VDeviceDPT::GetTriggeredLineState() const {
+	return DeviceDPTLineState_Fire;
+}
+
 void VDeviceDPT::Init() {
 	/* Привязка конфигурации к общему буферу VDeviceCfg::reserv */
 	if (CfgPtr != nullptr) {
@@ -44,12 +48,8 @@ void VDeviceDPT::Init() {
 	}
 
 	if (Config != nullptr) {
-		uint8_t mode = Config->mode;
-		if (mode <= DeviceDPTMode_Button) {
-			Mode = static_cast<DeviceDPTMode>(mode);
-		} else {
-			Mode = DeviceDPTMode_DPT;
-		}
+		/* mode оставляем как legacy-параметр в конфиге, но на поведение "чистого ДПТ" не влияет */
+		Mode = DeviceDPTMode_DPT;
 
 		useMax = Config->use_max ? 1u : 0u;
 
@@ -133,12 +133,12 @@ void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 		} break;
 
 		case 14: {
-			/* Установка режима устройства (0=DPT,1=Limit,2=Button) */
+			/* Legacy: сохраняем mode в конфиг для совместимости, но логика DPT от него не зависит */
 			if (Config != nullptr && Parameters != nullptr) {
 				uint8_t mode = Parameters[0];
 				if (mode <= DeviceDPTMode_Button) {
 					Config->mode = mode;
-					Mode = static_cast<DeviceDPTMode>(mode);
+					Mode = DeviceDPTMode_DPT;
 					if (VDeviceSaveCfg != nullptr) {
 						VDeviceSaveCfg();
 					}
@@ -174,7 +174,7 @@ void VDeviceDPT::SetStatus() {
 	 * 1 - Обрыв
 	 * 2 - КЗ
 	 * 3 - Пожар
-	 * 4 - Нажатие (режим концевика)
+	 * 4 - Нажатие
 	 */
 
 	Data[0] = LineState;
@@ -350,13 +350,11 @@ void VDeviceDPT::UpdateLineStateInstant() {
 		} else if (r >= DPT_LIMIT_FAULT) {
 			LineState = DeviceDPTLineState_Fault;
 		} else if (r >= DPT_LIMIT_FIRE) {
-			/* Для DPT с MAX: пожар только по превышению температуры MAX.
-			 * Поэтому в режиме сопротивления не выставляем Fire. */
-			if (Mode == DeviceDPTMode_DPT && useMax) {
+			/* Для DPT с MAX: в режиме сопротивления fire не выставляем до подтверждения по MAX. */
+			if (useMax) {
 				LineState = DeviceDPTLineState_Short;
 			} else {
-				LineState = (Mode == DeviceDPTMode_DPT) ? DeviceDPTLineState_Fire
-				                                         : DeviceDPTLineState_Press;
+				LineState = GetTriggeredLineState();
 			}
 		} else {
 			LineState = DeviceDPTLineState_Short;
@@ -370,7 +368,7 @@ void VDeviceDPT::UpdateLineStateInstant() {
 		if (DPT_USE_MAX_FAULT_IN_LOGIC && max_fault) {
 			LineState = DeviceDPTLineState_Fault;
 		} else if (max_temp_c > static_cast<int16_t>(max_fire_threshold_c)) {
-			LineState = (Mode == DeviceDPTMode_DPT) ? DeviceDPTLineState_Fire : DeviceDPTLineState_Press;
+			LineState = GetTriggeredLineState();
 		} else {
 			LineState = DeviceDPTLineState_Short;
 		}
@@ -406,10 +404,5 @@ void VDeviceDPT::UpdateLineStateFiltered() {
 }
 
 uint8_t VDeviceDPT::GetDT() {
-	switch(Mode) {
-	case DeviceDPTMode_DPT: return DEVICE_DPT_TYPE;
-	case DeviceDPTMode_Button: return DEVICE_BUTTON_TYPE;
-	case DeviceDPTMode_Limit: return DEVICE_LSWITCH_TYPE;
-	}
 	return DEVICE_DPT_TYPE;
 }

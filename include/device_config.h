@@ -61,6 +61,7 @@ typedef struct DeviceDPTConfig {
      * 0 - ДПТ (пожар)
      * 1 - концевик (открытие)
      * 2 - кнопка (нажатие)
+     * ВАЖНО: для VDeviceDPT это legacy-поле, на поведение ДПТ не влияет.
      */
     uint8_t mode;
 
@@ -83,6 +84,30 @@ typedef struct DeviceDPTConfig {
     /* резерв: укладывается в VDeviceCfg::reserv (64-4=60 байт) */
     uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 6];
 } DeviceDPTConfig;
+
+/* Вид виртуальной кнопки */
+typedef enum DeviceButtonKind {
+    DeviceButtonKind_StartSP   = 0, /* имитация нажатия ПУСК СП на ППКУ (через callback из app) */
+    DeviceButtonKind_StartAll  = 1, /* широковещательный StartExtinguishment, data[0]=1 */
+    DeviceButtonKind_StartZone = 2  /* запуск зон из массива zones[7] */
+} DeviceButtonKind;
+
+typedef struct DeviceButtonConfig {
+    /* Совместимость с DeviceDPTConfig (общая часть для классификации линии) */
+	/* пока не вижу смысла в этом
+    uint8_t mode;
+    uint8_t use_max;
+    uint16_t max_fire_threshold_c;
+    uint16_t state_change_delay_ms;
+    */
+
+    /* Параметры виртуальной кнопки */
+    uint8_t button_kind;             /* DeviceButtonKind */
+    uint8_t zones[7];                /* список зон для режима StartZone */
+
+    /* резерв */
+    uint8_t reserved[VDEVICE_CFG_SIZE - 4 - (6 + 1 + 7)];
+} DeviceButtonConfig;
 
 
 typedef struct DeviceIgniterConfig {
