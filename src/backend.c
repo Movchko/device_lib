@@ -37,6 +37,15 @@ uint8_t GetRetranslate() {
 	return CanStopRetranslate;
 }
 
+
+__attribute__((weak)) void RcvStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvReplyStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvReplyStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvReplyStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+
+
 /* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
 __attribute__((weak)) void CanSendOverError(void) { (void)0; }
 
@@ -81,8 +90,7 @@ void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bu
 }
 
 void BackendProcess() {
-
-	//TODO:: здесь задержка запуска устройства в шине
+	//здесь задержка запуска устройства в шине
 	if(start_delay < (BoardDevicesList[0].h_adr * 30)) {
 		start_delay++;
 		return;
@@ -99,6 +107,13 @@ void BackendProcess() {
 			IndexSendMsgObj = 0;
 	}
 
+}
+
+uint8_t isFireCMD(uint8_t command) {
+	if(command >= ServiceCmd_Fire_SetStatusFire && command < ServiceCmd_GetConfigSize)
+		return 1;
+
+	return 0;
 }
 
 void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
@@ -121,6 +136,11 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
 	id.ID = MsgID;
 	uint8_t Command = Buf[0];
 
+	if(isFireCMD(Command)) {
+		FireServiceCmd(MsgID, Command, Buf, bus);
+	}
+
+
 	/* Broadcast-сообщение: адрес (zone, h_adr, l_adr) = 0, тип устройства задан */
 	if (/*(id.field.zone == 0) &&*/ (id.field.h_adr == 0) && (id.field.l_adr == 0))
 		isBroadcast = 1;
@@ -131,9 +151,12 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
 		/* Сообщение предназначено устройству, если совпадает тип,
 		 * а также зона и адрес, либо это broadcast по типу. */
 		uint8_t type_match = (id.field.d_type == (BoardDevicesList[i].d_type & 0x7F));
-		uint8_t addr_match = /*(id.field.zone == (BoardDevicesList[i].zone & 0x7F)) &&*/ /* пока без валидации зоны, адреса достаточно */
+		uint8_t addr_match = (id.field.zone == (BoardDevicesList[i].zone & 0x7F)) &&
 		                     (id.field.h_adr == BoardDevicesList[i].h_adr) &&
 		                     ((id.field.l_adr & 0x3F) == (BoardDevicesList[i].l_adr & 0x3F));
+
+		if(type_match && addr_match && id.field.dir) // если вдруг кольцо на себя
+			return;
 
 		if ((type_match && addr_match) || (/*type_match &&*/ isBroadcast)) {
 
@@ -188,20 +211,54 @@ void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t b
     SendMessageFull(can_id, data, Now, bus);
 }
 
-void FireServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
-	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+void FireServiceCmd(uint32_t MsgID, uint8_t Command, uint8_t *MsgData, uint8_t bus) {
+ // здесь фильтрация MsgID, чтобы не дублировать это в каждом утсройстве
+	/* Broadcast-сообщение: адрес (zone, h_adr, l_adr) = 0, тип устройства задан */
+	can_ext_id_t id;
+	id.ID = 0;
+	id.ID = MsgID;
+	uint8_t isBroadcast = 0;
+	uint8_t is_our_cmd;
+
+	if (((id.field.zone == 0) || (id.field.zone == BoardDevicesList[0].zone)) && (id.field.h_adr == 0) && (id.field.l_adr == 0))
+		isBroadcast = 1;
+	else
+		isBroadcast = 0;
+
+	for(uint8_t i = 0; i < nDevs; i++)	{
+		/* Сообщение предназначено устройству, если совпадает тип,
+		 * а также зона и адрес, либо это broadcast по типу. */
+		uint8_t type_match = (id.field.d_type == (BoardDevicesList[i].d_type & 0x7F));
+		uint8_t addr_match = (id.field.zone == (BoardDevicesList[i].zone & 0x7F)) &&
+		                     (id.field.h_adr == BoardDevicesList[i].h_adr) &&
+		                     ((id.field.l_adr & 0x3F) == (BoardDevicesList[i].l_adr & 0x3F));
+
+		if(type_match && addr_match && id.field.dir) // если вдруг кольцо на себя
+			return;
+
+		if ((type_match && addr_match) || (isBroadcast)) {
+			is_our_cmd = 1;
+		}
+	}
+
 	switch(Command) {
-		case ServiceCmd_SetStatusFire: {
-			RcvStatusFire();
+		case ServiceCmd_Fire_SetStatusFire: {
+			RcvStatusFire(MsgID, MsgData, is_our_cmd);
 		}break;
-		case ServiceCmd_ReplyStatusFire: {
-			RcvReplyStatusFire();
+		case ServiceCmd_Fire_ReplyStatusFire: {
+			RcvReplyStatusFire(MsgID, MsgData, is_our_cmd);
 		}break;
-		case ServiceCmd_StartExtinguishment: {
-			RcvStartExtinguishment(MsgData);
+		case ServiceCmd_Fire_StartExtinguishment: {
+			RcvStartExtinguishment(MsgID, MsgData, is_our_cmd);
 		}break;
-		case ServiceCmd_StopExtinguishment: {
-			RcvStopExtinguishment();
+		case ServiceCmd_Fire_StopExtinguishment: {
+			RcvStopExtinguishment(MsgID, MsgData, is_our_cmd);
+		}break;
+		case ServiceCmd_Fire_SetReplyStartExtinguishment: {
+			 RcvReplyStartExtinguishment(MsgID, MsgData, is_our_cmd);
+		}break;
+		case ServiceCmd_Fire_SetReplyStopExtinguishment: {
+			RcvReplyStopExtinguishment(MsgID, MsgData, is_our_cmd);
 		}break;
 	}
 }
@@ -273,15 +330,10 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 		case ServiceCmd_DefaultConfig: { // restore defaults into local config
 			DefaultConfig();
 		}break;
-		case ServiceCmd_SetSystemTime: {
-			// Установка системного времени реализуется на стороне ППКУ (STM32 RTC),
-			// на МКУ дополнительных действий не требуется.
-		}break;
 	}
 }
 
 static void UpdateServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
-	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
 
 	switch(Command) {
 		case ServiceCmd_SetUpdateWord: {
@@ -361,14 +413,16 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 		case ServiceCmd_SetSystemTime: {
 			RcvSetSystemTime(MsgData);
 		}break;
-
-		case ServiceCmd_SetStatusFire:
-		case ServiceCmd_ReplyStatusFire:
-		case ServiceCmd_StartExtinguishment:
-		case ServiceCmd_StopExtinguishment: {
+/*
+		case ServiceCmd_Fire_SetStatusFire:
+		case ServiceCmd_Fire_ReplyStatusFire:
+		case ServiceCmd_Fire_StartExtinguishment:
+		case ServiceCmd_Fire_StopExtinguishment:
+		case ServiceCmd_Fire_SetReplyStartExtinguishment:
+		case ServiceCmd_Fire_SetReplyStopExtinguishment: {
 			FireServiceCmd(Dev, Command, MsgData);
 		}break;
-
+*/
 		// Work with config data
 		case ServiceCmd_GetConfigSize:
 		case ServiceCmd_GetConfigCRC:
@@ -403,19 +457,45 @@ void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr) {
 }
 
 void SetStatusFire(uint8_t *Data) {
-	SendMessage(0, ServiceCmd_SetStatusFire, Data, 1, BUS_CAN12);
+	SendMessage(0, ServiceCmd_Fire_SetStatusFire, Data, 1, BUS_CAN12);
 }
+
 void SetReplyStatusFire(uint8_t zone) {
 	uint8_t Data[7] = {zone, 0, 0, 0, 0, 0, 0};
-	SendMessage(0, ServiceCmd_ReplyStatusFire, Data, 1, BUS_CAN12);
+	SendMessage(0, ServiceCmd_Fire_ReplyStatusFire, Data, 1, BUS_CAN12);
 }
-void SetStartExtinguishment(uint8_t type, uint8_t zone_delay, uint8_t module_delay) {
-	uint8_t Data[7] = {type, zone_delay, module_delay, 0, 0, 0, 0};
-	SendMessage(0, ServiceCmd_StartExtinguishment, Data, 1, BUS_CAN12);
+
+void SetReplyStartExtinguishment(uint8_t dev) {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+	SendMessage(dev, ServiceCmd_Fire_SetReplyStartExtinguishment, Data, 1, BUS_CAN12);
+}
+
+void SetReplyStopExtinguishment(uint8_t dev) {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+	SendMessage(dev, ServiceCmd_Fire_SetReplyStopExtinguishment, Data, 1, BUS_CAN12);
+}
+
+void SetStartExtinguishment(uint8_t zone, uint8_t zone_delay, uint8_t module_delay, uint8_t type) {
+	can_ext_id_t can_id;
+	uint8_t data[8] = {ServiceCmd_Fire_StartExtinguishment, zone, zone_delay, module_delay, type, 0, 0, 0};
+	can_id.ID = 0;
+	can_id.field.dir = 1;
+	can_id.field.d_type = 0;
+	can_id.field.h_adr = 0;
+	can_id.field.l_adr = 0;
+	can_id.field.zone = zone;
+    SendMessageFull(can_id, data, 1, BUS_CAN12);
 }
 void SetStopExtinguishment() {
-	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
-	SendMessage(0, ServiceCmd_StopExtinguishment, Data, 1, BUS_CAN12);
+	can_ext_id_t can_id;
+	uint8_t data[8] = {ServiceCmd_Fire_StopExtinguishment, 0, 0, 0, 0, 0, 0, 0};
+	can_id.ID = 0;
+	can_id.field.dir = 1;
+	can_id.field.d_type = 0;
+	can_id.field.h_adr = 0;
+	can_id.field.l_adr = 0;
+	can_id.field.zone = 0;
+    SendMessageFull(can_id, data, 1, BUS_CAN12);
 }
 
 

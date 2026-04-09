@@ -50,7 +50,7 @@ void VDeviceButton::OnPressEdge(void) {
 	case DeviceButtonKind_StartAll:
 		/* StartAll: data[0]=1 (тип), зона=0 (broadcast). */
 		data[0] = 1u;
-		SendAllMessage(ServiceCmd_StartExtinguishment, data, SEND_NOW, BUS_CAN12);
+		SendAllMessage(ServiceCmd_Fire_StartExtinguishment, data, SEND_NOW, BUS_CAN12);
 		break;
 
 	case DeviceButtonKind_StartZone:
@@ -61,7 +61,7 @@ void VDeviceButton::OnPressEdge(void) {
 				continue;
 			}
 			data[0] = zone;
-			SendAllMessage(ServiceCmd_StartExtinguishment, data, SEND_NOW, BUS_CAN12);
+			SendAllMessage(ServiceCmd_Fire_StartExtinguishment, data, SEND_NOW, BUS_CAN12);
 		}
 		break;
 	}

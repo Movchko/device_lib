@@ -63,10 +63,12 @@ enum ServiceCmd {
 	ServiceCmd_StopStartSend		= 129,
 	ServiceCmd_StopStartReTranslate	= 130,
 
-	ServiceCmd_SetStatusFire		= 140,
-	ServiceCmd_ReplyStatusFire		= 141,
-	ServiceCmd_StartExtinguishment 	= 142,
-	ServiceCmd_StopExtinguishment 	= 143,
+	ServiceCmd_Fire_SetStatusFire		= 140,
+	ServiceCmd_Fire_ReplyStatusFire		= 141,
+	ServiceCmd_Fire_StartExtinguishment 	= 142,
+	ServiceCmd_Fire_StopExtinguishment 	= 143,
+	ServiceCmd_Fire_SetReplyStartExtinguishment = 144,
+	ServiceCmd_Fire_SetReplyStopExtinguishment 	= 145,
 
 	ServiceCmd_GetConfigSize 		= 150,
 	ServiceCmd_GetConfigCRC    		= 151,
@@ -92,6 +94,7 @@ void ProtocolParse(uint32_t ui32MsgID, uint8_t *pui8MsgData, uint8_t bus);
 
 void BackendProcess(); // необходимо вызывать в главной программе. 1000герц
 
+void FireServiceCmd(uint32_t MsgID, uint8_t Command, uint8_t *MsgData, uint8_t bus);
 
 /* положить сообщение в очередь на отравку
  * now 1 - отправить без очереди
@@ -106,13 +109,17 @@ uint8_t GetRetranslate(); // вернуть флаг разрешена ли р�
 
 void SetStatusFire(uint8_t *Data);
 void SetReplyStatusFire(uint8_t zone);
-void SetStartExtinguishment(uint8_t type, uint8_t zone_delay, uint8_t module_delay);
+void SetStartExtinguishment(uint8_t zone, uint8_t zone_delay, uint8_t module_delay, uint8_t type);
+void SetReplyStartExtinguishment(uint8_t dev);
 void SetStopExtinguishment();
+void SetReplyStopExtinguishment(uint8_t dev);
 
-void RcvStatusFire();
-void RcvReplyStatusFire();
-void RcvStartExtinguishment(uint8_t *MsgData);
-void RcvStopExtinguishment();
+void RcvStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvReplyStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvReplyStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvReplyStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
 
 // описать в главной программе
 void CANSendData(uint8_t *Buf);
@@ -127,7 +134,6 @@ uint8_t BackendGetDeviceCount(void);
 void CommandCB(uint8_t Dev, uint8_t Command, uint8_t *Parameters);
 void ListenerCommandCB(uint32_t MsgID, uint8_t *MsgData);
 uint32_t GetID();
-void FlashWriteData(uint8_t *ConfigPtr, uint32_t ConfigSize);
 void ResetMCU();
 void SetHAdr(uint8_t h_adr);
 void RcvSetSystemTime(uint8_t *MsgData);
