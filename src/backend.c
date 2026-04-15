@@ -44,7 +44,7 @@ __attribute__((weak)) void RcvStartExtinguishment(uint32_t MsgID,  uint8_t *MsgD
 __attribute__((weak)) void RcvReplyStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvReplyStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
-
+__attribute__((weak)) void RcvSetSystemTime(uint8_t *MsgData);
 
 /* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
 __attribute__((weak)) void CanSendOverError(void) { (void)0; }
