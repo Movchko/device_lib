@@ -33,6 +33,8 @@ uint8_t USBSndBuf[CDCPKTLEN] = {CDCPRE1, CDCPRE2};
 uint8_t CanStopSend = 0;
 uint8_t CanStopRetranslate = 0;
 
+uint8_t isSendStartMessage = 0;
+
 uint8_t GetRetranslate() {
 	return CanStopRetranslate;
 }
@@ -45,7 +47,8 @@ __attribute__((weak)) void RcvReplyStartExtinguishment(uint32_t MsgID,  uint8_t 
 __attribute__((weak)) void RcvStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvReplyStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvSetSystemTime(uint8_t *MsgData);
-
+__attribute__((weak)) void ListenerCommandCB(uint32_t MsgID, uint8_t *MsgData);
+__attribute__((weak)) void USBSendData(uint8_t *Buf);
 /* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
 __attribute__((weak)) void CanSendOverError(void) { (void)0; }
 
@@ -89,12 +92,27 @@ void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bu
 	IndexSaveMsgObj = next_save;
 }
 
+// стартовое сообщение, отправляем только по главному dev(MCU)
+void SendStartMessage() {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+	SendMessage(0, ServiceCmd_StartDevice, Data, 0, BUS_CAN12);
+	isSendStartMessage = 1;
+}
+
 void BackendProcess() {
 	//здесь задержка запуска устройства в шине
 	if(start_delay < (BoardDevicesList[0].h_adr * 30)) {
 		start_delay++;
 		return;
 	}
+
+	/*
+	 * один раз отправляем сообщение о запуске устрйоства
+	 * нормальный кейс - когда от устрйоства придёт такой пакет только 1 раз за включение
+	 * если больше 1 - значит устйроство перезапускалось, следует обратить внимание
+	 */
+	if(isSendStartMessage == 0)
+		SendStartMessage();
 
 	/* отправка сообщений в кан из циклического буфера, 1 сообщение каждые SEND_DELAY_MS*/
 	if(CanStopSend == 1)
@@ -106,7 +124,6 @@ void BackendProcess() {
 		if (IndexSendMsgObj >= NumSendMsgObj)
 			IndexSendMsgObj = 0;
 	}
-
 }
 
 uint8_t isFireCMD(uint8_t command) {

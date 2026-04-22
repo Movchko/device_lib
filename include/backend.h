@@ -78,11 +78,11 @@ enum ServiceCmd {
 	ServiceCmd_DefaultConfig 		= 155,
 	ServiceCmd_SetUpdateWord        = 156,
 
-	ServiceCmd_SetSystemTime		= 157,
+	ServiceCmd_SetSystemTime		= 157, // команда установки системного времени
 	ServiceCmd_UpdateTransmit       = 158,
-	ServiceCmd_GetVersion           = 159,
-
-
+	ServiceCmd_GetVersion           = 159, // команда запроса версии
+	ServiceCmd_StartDevice			= 160, // команда от устройства при запуске
+	ServiceCmd_PositionDevice		= 161, // команда "веса" устройства
 
 	ServiceCmd_CircSetAdr 		= 200,
 };
@@ -145,7 +145,6 @@ uint32_t GetConfigSize(); // get config size in  bytes
 uint32_t GetConfigWord(uint16_t num); // get 4 bytes
 void SetConfigWord(uint16_t num, uint32_t word); // set 4 bytes
 void SaveConfig();
-// выше функции описанныеы в главной программе
 
 // работа с удаленным обновлением прошивки
 uint8_t SetUpdateWord(uint32_t num, uint32_t word);                 // записать 4-байтное слово обновления
