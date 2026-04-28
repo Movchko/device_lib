@@ -20,10 +20,16 @@ class VDeviceRelay: public VDevice {
 	uint16_t settle_time_ms;
 	uint16_t settle_counter_ms;
 	uint8_t feedback_inverted;
+	uint8_t persist_state_enabled;
+	uint8_t switch_delay_s;
+	uint8_t pending_switch;
+	uint8_t pending_state;
+	uint32_t switch_delay_counter_ms;
 
 	void UpdateStatus(DeviceRelayStatus status);
 	void ApplyOutput(uint8_t state);
 	uint8_t ReadFeedbackState(void) const;
+	void SavePersistentStateIfNeeded(void);
 
 public:
 	VDeviceRelay(uint8_t ChNum);

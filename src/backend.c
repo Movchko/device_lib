@@ -46,6 +46,10 @@ __attribute__((weak)) void RcvStartExtinguishment(uint32_t MsgID,  uint8_t *MsgD
 __attribute__((weak)) void RcvReplyStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvReplyStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvPauseExtinguishmentTimer(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvReplyPauseExtinguishmentTimer(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvResumeExtinguishmentTimer(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvReplyResumeExtinguishmentTimer(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvSetSystemTime(uint8_t *MsgData);
 __attribute__((weak)) void ListenerCommandCB(uint32_t MsgID, uint8_t *MsgData);
 __attribute__((weak)) void USBSendData(uint8_t *Buf);
@@ -277,6 +281,18 @@ void FireServiceCmd(uint32_t MsgID, uint8_t Command, uint8_t *MsgData, uint8_t b
 		case ServiceCmd_Fire_SetReplyStopExtinguishment: {
 			RcvReplyStopExtinguishment(MsgID, MsgData, is_our_cmd);
 		}break;
+		case ServiceCmd_Fire_PauseExtinguishmentTimer: {
+			RcvPauseExtinguishmentTimer(MsgID, MsgData, is_our_cmd);
+		}break;
+		case ServiceCmd_Fire_ResumeExtinguishmentTimer: {
+			RcvResumeExtinguishmentTimer(MsgID, MsgData, is_our_cmd);
+		}break;
+		case ServiceCmd_Fire_SetReplyPauseExtinguishmentTimer: {
+			RcvReplyPauseExtinguishmentTimer(MsgID, MsgData, is_our_cmd);
+		}break;
+		case ServiceCmd_Fire_SetReplyResumeExtinguishmentTimer: {
+			RcvReplyResumeExtinguishmentTimer(MsgID, MsgData, is_our_cmd);
+		}break;
 	}
 }
 
@@ -492,6 +508,16 @@ void SetReplyStopExtinguishment(uint8_t dev) {
 	SendMessage(dev, ServiceCmd_Fire_SetReplyStopExtinguishment, Data, 1, BUS_CAN12);
 }
 
+void SetReplyPauseExtinguishmentTimer(uint8_t dev) {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+	SendMessage(dev, ServiceCmd_Fire_SetReplyPauseExtinguishmentTimer, Data, 1, BUS_CAN12);
+}
+
+void SetReplyResumeExtinguishmentTimer(uint8_t dev) {
+	uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+	SendMessage(dev, ServiceCmd_Fire_SetReplyResumeExtinguishmentTimer, Data, 1, BUS_CAN12);
+}
+
 void SetStartExtinguishment(uint8_t zone, uint8_t zone_delay, uint8_t module_delay, uint8_t type) {
 	can_ext_id_t can_id;
 	uint8_t data[8] = {ServiceCmd_Fire_StartExtinguishment, zone, zone_delay, module_delay, type, 0, 0, 0};
@@ -513,6 +539,30 @@ void SetStopExtinguishment() {
 	can_id.field.l_adr = 0;
 	can_id.field.zone = 0;
     SendMessageFull(can_id, data, 1, BUS_CAN12);
+}
+
+void SetPauseExtinguishmentTimer(uint8_t zone) {
+	can_ext_id_t can_id;
+	uint8_t data[8] = {ServiceCmd_Fire_PauseExtinguishmentTimer, zone, 0, 0, 0, 0, 0, 0};
+	can_id.ID = 0;
+	can_id.field.dir = 1;
+	can_id.field.d_type = 0;
+	can_id.field.h_adr = 0;
+	can_id.field.l_adr = 0;
+	can_id.field.zone = zone;
+	SendMessageFull(can_id, data, 1, BUS_CAN12);
+}
+
+void SetResumeExtinguishmentTimer(uint8_t zone) {
+	can_ext_id_t can_id;
+	uint8_t data[8] = {ServiceCmd_Fire_ResumeExtinguishmentTimer, zone, 0, 0, 0, 0, 0, 0};
+	can_id.ID = 0;
+	can_id.field.dir = 1;
+	can_id.field.d_type = 0;
+	can_id.field.h_adr = 0;
+	can_id.field.l_adr = 0;
+	can_id.field.zone = zone;
+	SendMessageFull(can_id, data, 1, BUS_CAN12);
 }
 
 

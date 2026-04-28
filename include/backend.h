@@ -69,6 +69,10 @@ enum ServiceCmd {
 	ServiceCmd_Fire_StopExtinguishment 	= 143,
 	ServiceCmd_Fire_SetReplyStartExtinguishment = 144,
 	ServiceCmd_Fire_SetReplyStopExtinguishment 	= 145,
+	ServiceCmd_Fire_PauseExtinguishmentTimer     = 146,
+	ServiceCmd_Fire_ResumeExtinguishmentTimer    = 147,
+	ServiceCmd_Fire_SetReplyPauseExtinguishmentTimer = 148,
+	ServiceCmd_Fire_SetReplyResumeExtinguishmentTimer = 149,
 
 	ServiceCmd_GetConfigSize 		= 150,
 	ServiceCmd_GetConfigCRC    		= 151,
@@ -113,6 +117,10 @@ void SetStartExtinguishment(uint8_t zone, uint8_t zone_delay, uint8_t module_del
 void SetReplyStartExtinguishment(uint8_t dev);
 void SetStopExtinguishment();
 void SetReplyStopExtinguishment(uint8_t dev);
+void SetPauseExtinguishmentTimer(uint8_t zone);
+void SetReplyPauseExtinguishmentTimer(uint8_t dev);
+void SetResumeExtinguishmentTimer(uint8_t zone);
+void SetReplyResumeExtinguishmentTimer(uint8_t dev);
 
 void RcvStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
 void RcvReplyStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
@@ -120,6 +128,10 @@ void RcvStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cm
 void RcvReplyStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
 void RcvStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
 void RcvReplyStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvPauseExtinguishmentTimer(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvReplyPauseExtinguishmentTimer(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvResumeExtinguishmentTimer(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvReplyResumeExtinguishmentTimer(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
 
 // описать в главной программе
 void CANSendData(uint8_t *Buf);

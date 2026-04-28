@@ -81,8 +81,8 @@ typedef struct DeviceDPTConfig {
      */
     uint16_t state_change_delay_ms;
 
-    /* резерв: укладывается в VDeviceCfg::reserv (64-4=60 байт) */
-    uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 6];
+    /* резерв до полного размера VDeviceCfg::reserv (64 байта) */
+    uint8_t reserved[VDEVICE_CFG_SIZE - 6];
 } DeviceDPTConfig;
 
 /* Вид виртуальной кнопки */
@@ -105,8 +105,8 @@ typedef struct DeviceButtonConfig {
     uint8_t button_kind;             /* DeviceButtonKind */
     uint8_t zones[7];                /* список зон для режима StartZone */
 
-    /* резерв */
-    uint8_t reserved[VDEVICE_CFG_SIZE - 4 - (6 + 1 + 7)];
+    /* резерв до полного размера VDeviceCfg::reserv (64 байта) */
+    uint8_t reserved[VDEVICE_CFG_SIZE - (1 + 7)];
 } DeviceButtonConfig;
 
 
@@ -124,8 +124,10 @@ typedef struct DeviceIgniterConfig {
 	/* Количество повторных циклов прожига при отсутствии обрыва (0 или 1). По умолчанию 1 */
 	uint8_t burn_retry_count;
 
-	/* резерв */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 6];
+	/* резерв до полного размера VDeviceCfg::reserv (64 байта).
+	 * Для текущего порядка полей есть 1 байт выравнивания перед threshold_break_low,
+	 * поэтому используем 7 байт служебной части. */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 7];
 } DeviceIgniterConfig;
 
 typedef struct DeviceRelayConfig {
@@ -133,17 +135,58 @@ typedef struct DeviceRelayConfig {
 	 * 0 - выключено, 1 - включено */
 	uint8_t initial_state;
 
+	/* Режим "сохранение состояния":
+	 * 0 - отключено (по умолчанию),
+	 * 1 - после каждого переключения записываем текущее состояние в initial_state
+	 *     и сохраняем конфигурацию. */
+	uint8_t persist_state_enabled;
+
 	/* Инверсия обратной связи:
 	 * 0 - feedback 1 означает "включено"
 	 * 1 - feedback 0 означает "включено" */
 	uint8_t feedback_inverted;
 
+	/* Задержка перед переключением реле, секунды (0..255).
+	 * По умолчанию 0 (без задержки). */
+	uint8_t switch_delay_s;
+
 	/* Время ожидания установления обратной связи после переключения, мс */
 	uint16_t settle_time_ms;
 
-	/* резерв */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 4 - 4];
+	/* резерв до полного размера VDeviceCfg::reserv (64 байта) */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 6];
 } DeviceRelayConfig;
+
+typedef enum DeviceLimitSwitchFunction {
+	DeviceLimitSwitchFunction_SetFault = 1,   /* выставить статус "неисправность" */
+	DeviceLimitSwitchFunction_SetManual = 2,  /* перевести ППКУ в ручной режим */
+	DeviceLimitSwitchFunction_SetAuto = 3,    /* перевести ППКУ в автоматический режим */
+	DeviceLimitSwitchFunction_PauseStart = 4  /* пауза пуска (до отпускания) */
+} DeviceLimitSwitchFunction;
+
+typedef struct DeviceLimitSwitchConfig {
+	/* Совместимая "голова" c DeviceDPTConfig */
+	uint8_t mode;
+	uint8_t use_max;
+	uint16_t max_fire_threshold_c;
+	uint16_t state_change_delay_ms;
+
+	/* Новые параметры концевика */
+	uint8_t trigger_delay_s;   /* задержка срабатывания, сек */
+	uint8_t function;          /* DeviceLimitSwitchFunction */
+	uint8_t normal_closed;     /* 0=NO, 1=NC */
+
+	/* резерв до полного размера VDeviceCfg::reserv (64 байта) */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 9];
+} DeviceLimitSwitchConfig;
+
+#ifdef __cplusplus
+static_assert(sizeof(DeviceDPTConfig) == VDEVICE_CFG_SIZE, "DeviceDPTConfig size mismatch");
+static_assert(sizeof(DeviceButtonConfig) == VDEVICE_CFG_SIZE, "DeviceButtonConfig size mismatch");
+static_assert(sizeof(DeviceIgniterConfig) == VDEVICE_CFG_SIZE, "DeviceIgniterConfig size mismatch");
+static_assert(sizeof(DeviceRelayConfig) == VDEVICE_CFG_SIZE, "DeviceRelayConfig size mismatch");
+static_assert(sizeof(DeviceLimitSwitchConfig) == VDEVICE_CFG_SIZE, "DeviceLimitSwitchConfig size mismatch");
+#endif
 
 
 

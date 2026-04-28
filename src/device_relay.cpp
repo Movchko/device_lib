@@ -11,6 +11,11 @@ VDeviceRelay::VDeviceRelay(uint8_t ChNum) : VDevice(ChNum)
 	settle_time_ms = 100;
 	settle_counter_ms = 0;
 	feedback_inverted = 0;
+	persist_state_enabled = 0;
+	switch_delay_s = 0u;
+	pending_switch = 0u;
+	pending_state = 0u;
+	switch_delay_counter_ms = 0u;
 }
 
 void VDeviceRelay::Init()
@@ -23,16 +28,23 @@ void VDeviceRelay::Init()
 
 	if (Config != nullptr) {
 		desired_state = (Config->initial_state != 0u) ? 1u : 0u;
+		persist_state_enabled = (Config->persist_state_enabled != 0u) ? 1u : 0u;
 		feedback_inverted = (Config->feedback_inverted != 0u) ? 1u : 0u;
+		switch_delay_s = Config->switch_delay_s;
 		settle_time_ms = (Config->settle_time_ms != 0u) ? Config->settle_time_ms : 100u;
 	} else {
 		desired_state = 0u;
+		persist_state_enabled = 0u;
 		feedback_inverted = 0u;
+		switch_delay_s = 0u;
 		settle_time_ms = 100u;
 	}
 
 	error_flag = 0u;
 	settle_counter_ms = 0u;
+	pending_switch = 0u;
+	pending_state = desired_state;
+	switch_delay_counter_ms = 0u;
 	ApplyOutput(desired_state);
 	actual_state = ReadFeedbackState();
 	UpdateStatus(DeviceRelayStatus_Idle);
@@ -59,6 +71,19 @@ uint8_t VDeviceRelay::ReadFeedbackState(void) const
 
 void VDeviceRelay::Process()
 {
+	if (pending_switch != 0u) {
+		if (switch_delay_counter_ms > 0u) {
+			switch_delay_counter_ms--;
+		}
+		if (switch_delay_counter_ms == 0u) {
+			desired_state = pending_state;
+			ApplyOutput(desired_state);
+			settle_counter_ms = 0u;
+			pending_switch = 0u;
+			SavePersistentStateIfNeeded();
+		}
+	}
+
 	actual_state = ReadFeedbackState();
 
 	if (settle_counter_ms < settle_time_ms) {
@@ -78,21 +103,45 @@ void VDeviceRelay::Process()
 	}
 }
 
+void VDeviceRelay::SavePersistentStateIfNeeded(void)
+{
+	if (Config == nullptr || persist_state_enabled == 0u) {
+		return;
+	}
+	Config->initial_state = desired_state;
+	if (VDeviceSaveCfg != nullptr) {
+		VDeviceSaveCfg();
+	}
+}
+
 void VDeviceRelay::CommandCB(uint8_t Command, uint8_t *Parameters)
 {
 	if (Command == 10u) {
+		uint8_t new_state = desired_state;
 
 		/* cmd=10: переключение реле.
 		 * Если Parameters[0] == 0/1 — установить явно.
 		 * Иначе (или без параметра) — инвертировать текущее желаемое состояние. */
 		if (Parameters != nullptr && (Parameters[0] == 0u || Parameters[0] == 1u)) {
-			desired_state = Parameters[0];
+			new_state = Parameters[0];
 		} else {
-			desired_state = (desired_state == 0u) ? 1u : 0u;
+			new_state = (desired_state == 0u) ? 1u : 0u;
 		}
 
-		ApplyOutput(desired_state);
-		settle_counter_ms = 0u;
+		if (switch_delay_s > 0u) {
+			pending_state = new_state;
+			pending_switch = 1u;
+			switch_delay_counter_ms = (uint32_t)switch_delay_s * 1000u;
+			if (switch_delay_counter_ms == 0u) {
+				switch_delay_counter_ms = 1u;
+			}
+		} else {
+			desired_state = new_state;
+			ApplyOutput(desired_state);
+			settle_counter_ms = 0u;
+			pending_switch = 0u;
+			SavePersistentStateIfNeeded();
+		}
 	}
 
 }
