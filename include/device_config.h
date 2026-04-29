@@ -46,8 +46,17 @@ typedef struct PPKYCfg {
 
 	uint8_t beep;
 	uint8_t fire_mode; // режим тушения 0 - автоматический, 1 - автономный, 2 - ручной
-	uint8_t _pad[2];  /* явное выравнивание под CfgDevices (offset 36), заменяет reserv  */
+	uint8_t power_input; // питание ввод (0 - 2 ввода, 1 - 1 ввод)
+	uint8_t power_value; // значение питания. в целых вольтах.
 
+	uint8_t rs485_on; // включение внешнего 485
+	uint8_t ex_can_on; // включение внешнего can
+	uint8_t ex_can_protocol;  // выбор протокола внешнего can (0 - 1939, 1 - 1979)
+	uint8_t isBRP; // наличие БРП
+
+	uint8_t reserv[32];
+
+	// выравниваем по 4 байта
 	MKUCfg	CfgDevices[32];
 
 	int8_t zone_name[ZONE_NUMBER][ZONE_NAME_SIZE];
