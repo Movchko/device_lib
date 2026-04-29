@@ -46,7 +46,8 @@ typedef struct PPKYCfg {
 
 	uint8_t beep;
 	uint8_t fire_mode; // режим тушения 0 - автоматический, 1 - автономный, 2 - ручной
-	uint8_t _pad[2];  /* явное выравнивание под CfgDevices (offset 36), заменяет reserv  */
+	uint8_t fire_and; // режим или\и (0 - или, 1 - И)
+	uint8_t _pad[1];  /* явное выравнивание под CfgDevices (offset 36), заменяет reserv  */
 
 	MKUCfg	CfgDevices[32];
 
