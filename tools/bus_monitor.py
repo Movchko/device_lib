@@ -64,6 +64,7 @@ SERVICE_CMDS = {
     153: "SetConfigWord",
     154: "SaveConfig",
     155: "DefaultConfig",
+    157: "SetSystemTime",
     200: "CircSetAdr",
 }
 
@@ -171,6 +172,19 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
         if cmd == 151 and parsed["dir"]:  # GetConfigCRC ответ
             crc = struct.unpack_from("<I", data, 1)[0] if len(data) >= 5 else 0
             return _srv_line(f"  {srv_dev} | GetConfigCRC → 0x{crc:08X}")
+        if cmd == 157 and len(data) >= 7:  # SetSystemTime
+            def _bcd_to_int(v: int) -> int:
+                return ((v >> 4) & 0x0F) * 10 + (v & 0x0F)
+
+            hh = _bcd_to_int(data[1])
+            mm = _bcd_to_int(data[2])
+            ss = _bcd_to_int(data[3])
+            yy = _bcd_to_int(data[4])
+            mon = _bcd_to_int(data[5])
+            day = _bcd_to_int(data[6])
+            return _srv_line(
+                f"  {srv_dev} | SetSystemTime {hh:02d}:{mm:02d}:{ss:02d} {day:02d}.{mon:02d}.20{yy:02d}"
+            )
         line = f"  {srv_dev} | {cmd_name}"
         if show_raw_id:
             line += f"  [ID=0x{can_id:08X}]"
@@ -433,7 +447,8 @@ def run_read_config(ser, bsu: BSUParser, h_adr: int | None, l_adr: int = 0, zone
                     for b in chunk:
                         result = bsu.feed(b)
                         if result:
-                            rid, rdata = result
+                            rid = result[0]
+                            rdata = result[1]
                             pkt_count += 1
                             if log_pkts:
                                 ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
@@ -468,7 +483,8 @@ def run_read_config(ser, bsu: BSUParser, h_adr: int | None, l_adr: int = 0, zone
             for b in chunk:
                 result = bsu.feed(b)
                 if result:
-                    rid, rdata = result
+                    rid = result[0]
+                    rdata = result[1]
                     p = parse_can_id(rid)
                     if p["d_type"] == d_type and p["dir"] == 1:
                         h_adr = p["h_adr"]
@@ -527,6 +543,26 @@ def run_read_config(ser, bsu: BSUParser, h_adr: int | None, l_adr: int = 0, zone
     return 0
 
 
+# --- Смещения PPKYCfg / MKUCfg (device_lib/include/device_config.h, ARM GCC) ---
+CFG_BASE = 72  # sizeof(UniqId) + beep..isBRP + reserv[32] до CfgDevices[0]
+ZONE_NUMBER_CFG = 100
+ZONE_NAME_SIZE_CFG = 64
+ZONE_NAME_AREA_CFG = ZONE_NUMBER_CFG * ZONE_NAME_SIZE_CFG  # 6400
+FIRE_AND_BYTES_CFG = ZONE_NUMBER_CFG  # uint8_t fire_and[ZONE_NUMBER]
+NUM_DEV_IN_MCU_CFG = 32
+MKU_UID_BYTES = 32
+MKU_VDTYPE_BYTES = NUM_DEV_IN_MCU_CFG * 4  # 128
+MKU_MODULE_DELAY_BYTES = NUM_DEV_IN_MCU_CFG * 4  # 128
+# Начало Devices[0] внутри MKUCfg (после UId + VDtype + zone_delay + module_delay)
+MKU_DEVICES0_OFF = MKU_UID_BYTES + MKU_VDTYPE_BYTES + 4 + MKU_MODULE_DELAY_BYTES  # 292
+MKU_STRIDE_BYTES = MKU_DEVICES0_OFF + NUM_DEV_IN_MCU_CFG * 64 + 64  # 2404 = sizeof(MKUCfg)
+MKU_TOTAL_WORDS = MKU_STRIDE_BYTES // 4  # 601 слов на один MKUCfg
+MKU_POST_UID_WORDS = (MKU_STRIDE_BYTES - MKU_UID_BYTES) // 4  # 593 слова после UId
+
+# Минимальный размер PPKYCfg по device_config.h (чтобы fire_and всегда помещался в буфер и читался по словам)
+MIN_PPKY_CFG_BYTES = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES + ZONE_NAME_AREA_CFG + FIRE_AND_BYTES_CFG
+
+
 def read_config_bytes(
     ser, bsu: BSUParser, h_adr: int, l_adr: int = 0, zone: int = 0,
     progress_callback=None,
@@ -534,8 +570,10 @@ def read_config_bytes(
     """
     Читает конфигурацию с ППКУ, возвращает (config_bytes, size) или (None, 0) при ошибке.
     Оптимизация:
-      - чтение MKUCfg обрывается по первому нулевому UniqId;
-      - чтение имён зон обрывается по первой полностью нулевой зоне.
+      - чтение CfgDevices[i] обрывается по первому полностью нулевому UniqId МКУ;
+      - внутри занятого MKUCfg читается полный блок sizeof(MKUCfg) (VDtype, задержки, Devices, reserv);
+      - имена зон — до первой полностью нулевой зоны;
+      - затем байты fire_and[ZONE_NUMBER].
     """
     d_type = DEVICE_PPKY_TYPE
     can_id_req = build_can_id(d_type, h_adr, l_adr, zone, 0)
@@ -561,7 +599,8 @@ def read_config_bytes(
                     for b in chunk:
                         result = bsu.feed(b)
                         if result:
-                            rid, rdata = result
+                            rid = result[0]
+                            rdata = result[1]
                             if rid == can_id_rsp and len(rdata) > 0 and rdata[0] == expected_cmd:
                                 if expected_word_idx is not None and len(rdata) >= 3:
                                     got_idx = (rdata[1] << 8) | rdata[2]
@@ -583,14 +622,17 @@ def read_config_bytes(
                   (rsp[2] << 16) |
                   (rsp[3] << 8)  |
                    rsp[4])
+    # Если прошивка отдаёт размер без хвоста (или с усечённым округлением), расширяем буфер
+    # до минимума, иначе слова fire_and (слово #20850 при стандартном sizeof) не попадают в буфер.
+    if size_bytes < MIN_PPKY_CFG_BYTES:
+        size_bytes = MIN_PPKY_CFG_BYTES
 
-    # --- 1. Базовые параметры структуры ---
-    ZONE_NAME_SIZE = 64
-    ZONE_NUMBER = 100
-    ZONE_NAME_AREA = ZONE_NUMBER * ZONE_NAME_SIZE  # 6400
-    mku_area = size_bytes - CFG_BASE - ZONE_NAME_AREA
-    MKUCFG_SIZE = mku_area // 32 if mku_area > 0 else 1068
-    zone_name_offset = CFG_BASE + 32 * MKUCFG_SIZE
+    # --- 1. Базовые параметры структуры (PPKYCfg: CfgDevices[32] фикс. sizeof(MKUCfg)) ---
+    ZONE_NAME_SIZE = ZONE_NAME_SIZE_CFG
+    ZONE_NUMBER = ZONE_NUMBER_CFG
+    ZONE_NAME_AREA = ZONE_NAME_AREA_CFG
+    MKUCFG_STRIDE = MKU_STRIDE_BYTES
+    zone_name_offset = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKUCFG_STRIDE
 
     num_words = (size_bytes + 3) // 4
 
@@ -639,12 +681,10 @@ def read_config_bytes(
         if not store_word(i):
             return (None, 0)
 
-    # --- 3. MKUCfg по-блочно, обрезая по нулевому UniqId ---
-    # Дополнительно: внутри каждого MKUCfg пропускаем чтение виртуальных устройств,
-    # которых нет: если Devices[i].type == 0, то Devices[i..] не читаем.
-    UID_WORDS = 8   # 32 байта UID = 8 слов
-    for i in range(32):
-        base_off = CFG_BASE + i * MKUCFG_SIZE
+    # --- 3. MKUCfg по-блочно, обрываем по нулевому UniqId; внутри блока — полный sizeof(MKUCfg) ---
+    UID_WORDS = MKU_UID_BYTES // 4  # 8 слов
+    for i in range(NUM_DEV_IN_MCU_CFG):
+        base_off = CFG_BASE + i * MKUCFG_STRIDE
         base_idx = base_off // 4
         if base_off >= zone_name_offset or base_idx >= num_words:
             break
@@ -666,56 +706,14 @@ def read_config_bytes(
             progress_callback(pct, words_read, total_words)
 
         if uid_zero:
-            # Первый полностью нулевой UID — дальше МКУ нет
             break
 
-        # 3.2 Читаем фиксированную «шапку» MKUCfg до массива Devices:
-        # MKUCfg:
-        #  - UniqId:            32 байта  (8 слов)  [уже прочитали]
-        #  - VDtype[32]:        128 байт  (32 слова)
-        #  - zone_delay:        4 байта   (1 слово)
-        #  - module_delay[32]:  128 байт  (32 слова)
-        # Итого до Devices[0]:  292 байта (73 слова) от начала MKUCfg.
-        DEVICES0_WORD = 73  # смещение в словах от начала MKUCfg
-        DEVICE_WORDS = 16   # 64 байта на один VDeviceCfg
-        header_start = base_idx + UID_WORDS
-        header_end = base_idx + DEVICES0_WORD
-        for idx in range(header_start, header_end):
+        # 3.2 Остаток MKUCfg: VDtype, zone_delay, module_delay, Devices[32], reserv[64]
+        for idx in range(base_idx + UID_WORDS, base_idx + MKU_TOTAL_WORDS):
             if idx >= num_words:
                 break
             if not store_word(idx):
                 return (None, 0)
-
-        # 3.3 Читаем Devices[0..] пока type != 0.
-        # type лежит в первом слове VDeviceCfg.
-        for dev in range(32):
-            dev_base = base_idx + DEVICES0_WORD + dev * DEVICE_WORDS
-            if dev_base >= num_words:
-                break
-            type_word = fetch_word(dev_base)
-            if type_word is None:
-                return (None, 0)
-
-            # Записываем type в буфер (1 слово)
-            pos = dev_base * 4
-            if pos + 4 <= size_bytes:
-                struct.pack_into(">I", config, pos, type_word)
-            words_read += 1
-            if progress_callback:
-                pct = (words_read * 100) // total_words
-                progress_callback(pct, words_read, total_words)
-
-            if type_word == 0:
-                # Устройства больше нет — оставшиеся Devices[...] и reserv не читаем
-                break
-
-            # Прочитать остаток устройства (ещё 15 слов)
-            for w_i in range(1, DEVICE_WORDS):
-                idx = dev_base + w_i
-                if idx >= num_words:
-                    break
-                if not store_word(idx):
-                    return (None, 0)
 
     # --- 4. Имена зон, обрываем по первой полностью нулевой зоне ---
     for z in range(ZONE_NUMBER):
@@ -746,7 +744,21 @@ def read_config_bytes(
         if all_zero:
             break
 
-    return (bytes(config[:size_bytes]), size_bytes)
+    # --- 5. fire_and[ZONE_NUMBER] (после имён зон) ---
+    fire_off = zone_name_offset + ZONE_NAME_AREA
+    fire_words = (FIRE_AND_BYTES_CFG + 3) // 4
+    if fire_off + FIRE_AND_BYTES_CFG <= size_bytes:
+        fire_idx0 = fire_off // 4
+        for w_i in range(fire_words):
+            idx = fire_idx0 + w_i
+            if idx >= num_words:
+                break
+            if not store_word(idx):
+                return (None, 0)
+
+    # Возвращаем фактическую длину буфера (после возможного расширения до MIN_PPKY_CFG_BYTES)
+    out_len = len(config)
+    return (bytes(config[:out_len]), out_len)
 
 
 # device_config.h: типы устройств (совпадает с device.hpp, device_config.h)
@@ -782,37 +794,88 @@ def dump_config_hex(cfg: bytes, max_bytes: int = 256) -> list[str]:
     return lines
 
 
-# device_config.h: UniqId(32) + beep(1) + _pad[3] = 36 байт до CfgDevices
-CFG_BASE = 36
+def _u16_le_buf(b: bytes, off: int) -> int:
+    return struct.unpack_from("<H", b, off)[0]
+
+
+def _u32_le_buf(b: bytes, off: int) -> int:
+    return struct.unpack_from("<I", b, off)[0]
+
+
+def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
+    """Краткое описание Device*Config внутри VDeviceCfg::reserv (64 байта, LE)."""
+    if len(reserv) < 8:
+        return ""
+    parts: list[str] = []
+    if vd_type == 11:  # DeviceIgniterConfig: uint8 + pad + 2×uint16 + uint8 + …
+        disable = reserv[0]
+        th_lo = _u16_le_buf(reserv, 2)
+        th_hi = _u16_le_buf(reserv, 4)
+        retry = reserv[6]
+        parts.append(f"пороги={th_lo}-{th_hi}мВ retry={retry} КЗ_чек={'выкл' if disable else 'вкл'}")
+    elif vd_type == 12:  # DeviceDPTConfig
+        mode = reserv[0]
+        use_max = reserv[1]
+        th = _u16_le_buf(reserv, 2)
+        dms = _u16_le_buf(reserv, 4)
+        parts.append(f"режим={mode} MAX={'да' if use_max else 'нет'} T_пож={th}°C стаб={dms}мс")
+    elif vd_type == 17:  # DeviceRelayConfig
+        settle = _u16_le_buf(reserv, 4)
+        parts.append(
+            f"init={reserv[0]} persist={reserv[1]} inv_ОС={reserv[2]} задержка_перекл={reserv[3]}с ожид_ОС={settle}мс"
+        )
+    elif vd_type == 15:  # DeviceButtonConfig
+        kind = reserv[0]
+        zones = list(reserv[1:8])
+        parts.append(f"button_kind={kind} zones={zones}")
+    elif vd_type == 16:  # DeviceLimitSwitchConfig
+        mode = reserv[0]
+        use_max = reserv[1]
+        th = _u16_le_buf(reserv, 2)
+        dms = _u16_le_buf(reserv, 4)
+        trig = reserv[6]
+        func = reserv[7]
+        nc = reserv[8]
+        parts.append(
+            f"режим={mode} MAX={'да' if use_max else 'нет'} T={th}°C стаб={dms}мс "
+            f"trig={trig}s func={func} NC={nc}"
+        )
+    elif vd_type != 0 and any(reserv[:16]):
+        hx = reserv[:8].hex()
+        parts.append(f"reserv[:8]={hx}")
+    return " | ".join(parts)
 
 
 def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
     """
-    Парсит PPKYCfg и возвращает список строк с полями.
-    Структура: UniqId(32), beep(1), _pad[3], MKUCfg[32], zone_name[100][64].
-    MKUCfg = UniqId(32) + VDeviceCfg[16](64 each) + reserv[4]. MKUCfg = (size-36-6400)/32.
+    Парсит PPKYCfg (device_config.h) и возвращает список строк с полями.
+    PPKYCfg: UniqId(32), beep, fire_mode, power_*, rs485/ex_can, isBRP, reserv[32],
+    CfgDevices[32]×MKUCfg, zone_name[100][64], fire_and[100].
+    MKUCfg: UId, VDtype[32], zone_delay, module_delay[32], Devices[32]×64, reserv[64].
     """
     lines: list[str] = []
-    if debug_dump and len(cfg) >= CFG_BASE:
-        mku_area = len(cfg) - CFG_BASE - 6400
-        mku_computed = mku_area // 32 if mku_area > 0 else 0
+    zone_name_offset = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES
+    min_full = zone_name_offset + ZONE_NAME_AREA_CFG + FIRE_AND_BYTES_CFG
+
+    if debug_dump:
         lines.append("--- Дамп байт 0..255 (отладка) ---")
         lines.extend(dump_config_hex(cfg, 256))
-        lines.append(f"--- size={len(cfg)} → MKUCFG_SIZE={mku_computed} (mku_area={mku_area}, остаток={mku_area - 32*mku_computed}) ---")
-        lines.append(f"--- CfgDevices[0]: zone=off+20 l=off+21 h=off+22 d_type=off+23 dev0_type=off+32 reserv=off+36 (off={CFG_BASE}, type=4b) ---")
-        if len(cfg) >= CFG_BASE + 70:
-            lines.append(f"  cfg[{CFG_BASE+20}..{CFG_BASE+23}] (devId): zone={cfg[CFG_BASE+20]} l={cfg[CFG_BASE+21]} h={cfg[CFG_BASE+22]} d_type={cfg[CFG_BASE+23]}")
-            lines.append(f"  cfg[{CFG_BASE+32}] (Devices[0].type): {cfg[CFG_BASE+32]}")
+        tail = len(cfg) - CFG_BASE - ZONE_NAME_AREA_CFG - FIRE_AND_BYTES_CFG
+        mku_guess = tail // NUM_DEV_IN_MCU_CFG if tail > 0 else 0
+        lines.append(
+            f"--- size={len(cfg)} min_full≈{min_full} MKU_stride={MKU_STRIDE_BYTES} "
+            f"tail_for_mkus={tail} → tail/32={mku_guess} zone_off={zone_name_offset} ---"
+        )
+        if len(cfg) >= CFG_BASE + 24:
+            off0 = CFG_BASE
+            lines.append(
+                f"  MKU[0] devId: z={cfg[off0 + 20]} l={cfg[off0 + 21]} h={cfg[off0 + 22]} "
+                f"d_type={cfg[off0 + 23]} VDtype[0]={_u32_le_buf(cfg, off0 + 32)}"
+            )
         lines.append("---")
-    if len(cfg) < CFG_BASE:
-        return lines
 
-    ZONE_NAME_SIZE = 64
-    ZONE_NUMBER = 100
-    ZONE_NAME_AREA = ZONE_NUMBER * ZONE_NAME_SIZE  # 6400
-    # MKUCfg вычисляем из размера: (len - 36 - 6400) / 32
-    mku_area = len(cfg) - CFG_BASE - ZONE_NAME_AREA
-    MKUCFG_SIZE = mku_area // 32 if mku_area > 0 else 1068  # fallback 1068
+    if len(cfg) < 40:
+        return lines
 
     # ППКУ UId (первые 32 байта): devId в offset 20-23
     if len(cfg) >= 24:
@@ -822,62 +885,80 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
         ppky_dtype = cfg[23]
         lines.append(f"ППКУ: {_device_name(ppky_dtype)} h={ppky_h} l={ppky_l} z={ppky_zone}")
 
-    # beep
-    beep = cfg[32] if len(cfg) > 32 else 0
-    lines.append(f"beep: {beep}")
+    if len(cfg) < CFG_BASE:
+        return lines
 
-    # CfgDevices (до zone_name)
-    zone_name_offset = CFG_BASE + 32 * MKUCFG_SIZE
-    for i in range(32):
-        off = CFG_BASE + i * MKUCFG_SIZE
-        if off + 96 > len(cfg):  # нужен доступ к Devices[0].reserv
+    beep = cfg[32]
+    fire_mode = cfg[33]
+    power_input = cfg[34]
+    power_value = cfg[35]
+    rs485_on = cfg[36]
+    ex_can_on = cfg[37]
+    ex_can_protocol = cfg[38]
+    is_brp = cfg[39]
+    fm = ("авто", "автоном", "ручной")
+    fm_s = fm[fire_mode] if fire_mode < len(fm) else str(fire_mode)
+    lines.append(
+        f"beep={beep} fire_mode={fire_mode}({fm_s}) power: вводов={power_input} U={power_value}В "
+        f"rs485={rs485_on} ex_can={ex_can_on} протокол_can={ex_can_protocol} isBRP={is_brp}"
+    )
+
+    for i in range(NUM_DEV_IN_MCU_CFG):
+        off = CFG_BASE + i * MKU_STRIDE_BYTES
+        if off + MKU_STRIDE_BYTES > len(cfg):
             break
         zone = cfg[off + 20]
         l_adr = cfg[off + 21]
         h_adr = cfg[off + 22]
         d_type = cfg[off + 23]
-        dev0_type = cfg[off + 32]
-
-        # Если devId и первый VDeviceCfg полностью обнулены — считаем, что дальше устройств нет
-        if d_type == 0 and dev0_type == 0 and h_adr == 0 and l_adr == 0:
+        uid_empty = all(cfg[off + k] == 0 for k in range(32))
+        if uid_empty:
             break
 
+        zd = _u32_le_buf(cfg, off + 32 + MKU_VDTYPE_BYTES)  # после VDtype[32]
         d_name = _device_name(d_type)
-        dev_name = _device_name(dev0_type) if dev0_type else "—"
-        line = f"CfgDevices[{i}]: {d_name} h={h_adr} l={l_adr} z={zone} device={dev_name}"
+        lines.append(f"CfgDevices[{i}]: {d_name} h={h_adr} l={l_adr} z={zone} zone_delay={zd}с")
 
-        # Доп. поля из reserv (DeviceIgniterConfig / DeviceDPTConfig)
-        # type 4 байта → Devices[0].reserv начинается с off+36
-        reserv_base = off + 36
-        if dev0_type == 11:  # Спичка (DeviceIgniterConfig)
-            if reserv_base + 6 <= len(cfg):
-                disable_sc = cfg[reserv_base]
-                break_lo = struct.unpack("<H", cfg[reserv_base + 1 : reserv_base + 3])[0]
-                break_hi = struct.unpack("<H", cfg[reserv_base + 3 : reserv_base + 5])[0]
-                retry = cfg[reserv_base + 5]
-                if break_lo != 0 or break_hi != 0 or disable_sc != 0 or retry != 0:
-                    line += f" | break={break_lo}-{break_hi}mV retry={retry} disable_sc={disable_sc}"
-        elif dev0_type == 12:  # ДПТ (DeviceDPTConfig)
-            if reserv_base + 17 <= len(cfg):
-                fire_ohm = struct.unpack("<H", cfg[reserv_base : reserv_base + 2])[0]
-                norm_ohm = struct.unpack("<H", cfg[reserv_base + 2 : reserv_base + 4])[0]
-                break_ohm = struct.unpack("<I", cfg[reserv_base + 4 : reserv_base + 8])[0]
-                if fire_ohm != 0 or norm_ohm != 0 or break_ohm != 0:
-                    line += f" | fire={fire_ohm}Ω norm={norm_ohm}Ω break={break_ohm}Ω"
+        for j in range(NUM_DEV_IN_MCU_CFG):
+            vd_off = off + 32 + j * 4
+            vd_type = _u32_le_buf(cfg, vd_off)
+            if vd_type == 0:
+                continue
+            dev_res_off = off + MKU_DEVICES0_OFF + j * 64
+            reserv = cfg[dev_res_off : dev_res_off + 64] if dev_res_off + 64 <= len(cfg) else b""
+            extras = _device_cfg_extras(vd_type, reserv)
+            suf = f" — {extras}" if extras else ""
+            lines.append(f"  dev[{j}] {_device_name(vd_type)}{suf}")
 
-        lines.append(line)
-
-    # Zone names
-    for z in range(min(ZONE_NUMBER, max(0, (len(cfg) - zone_name_offset) // ZONE_NAME_SIZE))):
-        off = zone_name_offset + z * ZONE_NAME_SIZE
-        if off + ZONE_NAME_SIZE > len(cfg):
+    # Имена зон
+    for z in range(ZONE_NUMBER_CFG):
+        off = zone_name_offset + z * ZONE_NAME_SIZE_CFG
+        if off + ZONE_NAME_SIZE_CFG > len(cfg):
             break
-        name_bytes = cfg[off : off + ZONE_NAME_SIZE]
+        name_bytes = cfg[off : off + ZONE_NAME_SIZE_CFG]
         name = name_bytes.split(b"\x00")[0].decode("utf-8", errors="replace").strip()
         if not name:
-            # как только встретили пустое имя — дальше зон нет
             break
         lines.append(f"zone_name[{z}]: {name!r}")
+
+    # fire_and[ZONE_NUMBER] (байт 83400 = fire_and[0] при sizeof(MKUCfg)=2404)
+    fire_off = zone_name_offset + ZONE_NAME_AREA_CFG
+    if fire_off + FIRE_AND_BYTES_CFG <= len(cfg):
+        fire_and = cfg[fire_off : fire_off + FIRE_AND_BYTES_CFG]
+        lines.append(f"fire_and[0]={fire_and[0]} (offset={fire_off}, word#{fire_off // 4})")
+        if len(cfg) >= fire_off + 4:
+            w208 = struct.unpack_from(">I", cfg, fire_off)[0]
+            lines.append(
+                f"fire_and сырьё: слово#{(fire_off // 4)} BE=0x{w208:08X}, "
+                f"байты[0..3]={cfg[fire_off : fire_off + 4].hex()}"
+            )
+        and_zones = [str(zi) for zi, v in enumerate(fire_and) if v != 0]
+        if and_zones:
+            preview = ", ".join(and_zones[:40])
+            more = f" …(+{len(and_zones) - 40})" if len(and_zones) > 40 else ""
+            lines.append(f"fire_and (режим «И», ненулевые зоны): {preview}{more}")
+        else:
+            lines.append("fire_and: ни одна зона не в режиме «И» (везде «ИЛИ»)")
 
     return lines
 

@@ -98,7 +98,7 @@ class BusMonitorGUI:
         self.cfg_crc_saved_var = StringVar(value="—")
         self.cfg_crc_local_var = StringVar(value="—")
         self._last_crc_request: str | None = None
-        self.device_statuses: dict[tuple[int, int, int, int], tuple[str, float]] = {}  # key -> (line, last_seen_time)
+        self.device_statuses: dict[tuple[int, int, int, int, int], tuple[str, float]] = {}  # key -> (line, last_seen_time)
         self.status_idle_timeout = 15.0  # сек — убирать записи без посылок дольше 15 с
 
         self._build_ui(default_port)
@@ -270,7 +270,12 @@ class BusMonitorGUI:
         p = parse_can_id(can_id)
         if p["dir"] != 1:
             return
-        key = (p["d_type"], p["h_adr"], p["l_adr"], p["zone"])
+        cmd = data[0] if len(data) > 0 else -1
+        # Для ППКУ храним раздельно минимум два типа сообщений:
+        # статус (cmd=0) и время (cmd=157), чтобы они не затирали друг друга.
+        # Для остальных устройств ключ без разделения по cmd.
+        cmd_key = cmd if p["d_type"] == DEVICE_PPKY_TYPE else -1
+        key = (p["d_type"], p["h_adr"], p["l_adr"], p["zone"], cmd_key)
         line = format_packet(can_id, data, show_raw_id=False).strip()
         self.device_statuses[key] = (line, time.time())
         # Коалесинг: ставим обновление статусов в очередь только один раз

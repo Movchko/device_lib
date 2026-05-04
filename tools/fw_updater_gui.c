@@ -380,6 +380,20 @@ static void RequestDeviceVersion(const DeviceInfo *d) {
     SendBsuCanPacket(can_id_req, data, BSU_PKT_TYPE_CAN1);
 }
 
+static void InvalidateDeviceVersionCache(const DeviceInfo *d) {
+    if (!d) return;
+    for (int i = 0; i < g_devCount; i++) {
+        if (g_devices[i].d_type == d->d_type &&
+            g_devices[i].h_adr == d->h_adr &&
+            g_devices[i].l_adr == d->l_adr &&
+            g_devices[i].zone == d->zone) {
+            g_devices[i].version_valid = 0;
+            RefreshDeviceListRow(i);
+            return;
+        }
+    }
+}
+
 typedef struct {
     DeviceInfo snapshot[256];
     int count;
@@ -530,6 +544,10 @@ static void ForceReadVersions(void) {
     int sent = 0;
     for (int i = 0; i < g_devCount; i++) {
         if (!IsMcuType(g_devices[i].d_type)) continue;
+        /* Сбрасываем кэш версии, чтобы авто-опрос продолжал слать GET_VERSION,
+         * пока устройство не вернёт актуальный номер. */
+        g_devices[i].version_valid = 0;
+        RefreshDeviceListRow(i);
         RequestDeviceVersion(&g_devices[i]);
         sent++;
     }
@@ -832,6 +850,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             EnableWindow(g_hStart, TRUE);
             EnableWindow(g_hStop, FALSE);
+            /* После update_transmit МКУ перезагружается, и версия могла измениться:
+             * сбрасываем кэш и инициируем повторный опрос целевого МКУ. */
+            if (g_activeUpdateDevValid) {
+                InvalidateDeviceVersionCache(&g_activeUpdateDev);
+                if (InterlockedCompareExchange(&g_connected, 0, 0)) {
+                    RequestDeviceVersion(&g_activeUpdateDev);
+                }
+            }
             g_activeUpdateDevValid = 0;
             Logf(L"Обновление завершено.\r\n");
             break;
