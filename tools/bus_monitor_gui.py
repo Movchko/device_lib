@@ -265,6 +265,33 @@ class BusMonitorGUI:
         ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self.msg_queue.put({"log": f"[{ts}] {prefix}{msg}"})
 
+    @staticmethod
+    def _can_state_letter(state_code: int) -> str:
+        """Краткое обозначение состояния CAN-линии: A=active, S=short, B=break."""
+        if state_code == 0:
+            return "A"
+        if state_code == 1:
+            return "S"
+        if state_code == 2:
+            return "B"
+        return "?"
+
+    def _append_mcu_can_state(self, base_line: str, parsed: dict, data: bytes) -> str:
+        """Добавить декодирование новых статусов CAN для heartbeat МКУ (cmd=0)."""
+        if parsed["dir"] != 1:
+            return base_line
+        if parsed["d_type"] not in (13, 14, 20, 21, 22, 23):
+            return base_line
+        if len(data) < 8 or data[0] != 0:
+            return base_line
+        if "C0:" in base_line or "C1:" in base_line:
+            return base_line
+
+        can_state_mask = data[7]
+        can0 = self._can_state_letter(can_state_mask & 0x03)
+        can1 = self._can_state_letter((can_state_mask >> 2) & 0x03)
+        return f"{base_line} C0:{can0} C1:{can1}"
+
     def _update_device_status(self, can_id: int, data: bytes):
         """Обновить последний статус устройства (только dir=1 — ответы от устройств)."""
         p = parse_can_id(can_id)
@@ -277,6 +304,7 @@ class BusMonitorGUI:
         cmd_key = cmd if p["d_type"] == DEVICE_PPKY_TYPE else -1
         key = (p["d_type"], p["h_adr"], p["l_adr"], p["zone"], cmd_key)
         line = format_packet(can_id, data, show_raw_id=False).strip()
+        line = self._append_mcu_can_state(line, p, data)
         self.device_statuses[key] = (line, time.time())
         # Коалесинг: ставим обновление статусов в очередь только один раз
         # до фактической перерисовки Tk.

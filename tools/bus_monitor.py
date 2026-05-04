@@ -555,6 +555,9 @@ MKU_VDTYPE_BYTES = NUM_DEV_IN_MCU_CFG * 4  # 128
 MKU_MODULE_DELAY_BYTES = NUM_DEV_IN_MCU_CFG * 4  # 128
 # Начало Devices[0] внутри MKUCfg (после UId + VDtype + zone_delay + module_delay)
 MKU_DEVICES0_OFF = MKU_UID_BYTES + MKU_VDTYPE_BYTES + 4 + MKU_MODULE_DELAY_BYTES  # 292
+# module_delay[32] идёт сразу после zone_delay (uint32 LE на слот)
+MKU_ZONE_DELAY_OFF = MKU_UID_BYTES + MKU_VDTYPE_BYTES  # 160
+MKU_MODULE_DELAY_OFF = MKU_ZONE_DELAY_OFF + 4  # 164
 MKU_STRIDE_BYTES = MKU_DEVICES0_OFF + NUM_DEV_IN_MCU_CFG * 64 + 64  # 2404 = sizeof(MKUCfg)
 MKU_TOTAL_WORDS = MKU_STRIDE_BYTES // 4  # 601 слов на один MKUCfg
 MKU_POST_UID_WORDS = (MKU_STRIDE_BYTES - MKU_UID_BYTES) // 4  # 593 слова после UId
@@ -915,9 +918,19 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
         if uid_empty:
             break
 
-        zd = _u32_le_buf(cfg, off + 32 + MKU_VDTYPE_BYTES)  # после VDtype[32]
+        zd = _u32_le_buf(cfg, off + MKU_ZONE_DELAY_OFF)
         d_name = _device_name(d_type)
-        lines.append(f"CfgDevices[{i}]: {d_name} h={h_adr} l={l_adr} z={zone} zone_delay={zd}с")
+        mod_delays: list[str] = []
+        for j in range(NUM_DEV_IN_MCU_CFG):
+            vd_type_j = _u32_le_buf(cfg, off + 32 + j * 4)
+            if vd_type_j == 0:
+                continue
+            md_j = _u32_le_buf(cfg, off + MKU_MODULE_DELAY_OFF + j * 4)
+            mod_delays.append(f"{md_j}с")
+        md_part = f" module_delay={','.join(mod_delays)}" if mod_delays else ""
+        lines.append(
+            f"CfgDevices[{i}]: {d_name} h={h_adr} l={l_adr} z={zone} zone_delay={zd}с{md_part}"
+        )
 
         for j in range(NUM_DEV_IN_MCU_CFG):
             vd_off = off + 32 + j * 4
