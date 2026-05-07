@@ -62,6 +62,9 @@ typedef struct PPKYCfg {
 	int8_t zone_name[ZONE_NUMBER][ZONE_NAME_SIZE];
 	uint8_t fire_and[ZONE_NUMBER]; // режим или\и (0 - или, 1 - И)
 
+	uint8_t beep_block;
+	uint8_t wifi_block;
+
 } PPKYCfg;
 //END PPKY
 
