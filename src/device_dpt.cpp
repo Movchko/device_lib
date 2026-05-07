@@ -10,7 +10,6 @@
 #endif
 
 VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
-	State = DeviceDPTState_Idle;
 	Status = DeviceDPTStatus_Idle;
 	prevLineState = LineState = DeviceDPTLineState_Normal;
 	Config = nullptr;
@@ -71,7 +70,6 @@ void VDeviceDPT::Init() {
 		state_change_delay_ms = 100u;
 	}
 
-	State = DeviceDPTState_Idle;
 	Status = DeviceDPTStatus_Idle;
 	LineState = DeviceDPTLineState_Normal;
 	pendingLineState = LineState;
@@ -89,17 +87,7 @@ void VDeviceDPT::Init() {
 }
 
 void VDeviceDPT::Process() {
-	switch(State) {
-		case DeviceDPTState_Idle: {
-			/* В режиме Idle просто обновляем состояние линии */
-			UpdateLineStateFiltered();
-		} break;
-
-		case DeviceDPTState_Error: {
-			/* В режиме Error тоже проверяем линию (может восстановиться) */
-			UpdateLineStateFiltered();
-		} break;
-	}
+	UpdateLineStateFiltered();
 }
 
 void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
@@ -367,6 +355,8 @@ void VDeviceDPT::UpdateLineStateInstant() {
 		 */
 		if (DPT_USE_MAX_FAULT_IN_LOGIC && max_fault) {
 			LineState = DeviceDPTLineState_Fault;
+		} else if(max_temp_c > (max_fire_threshold_c - (max_fire_threshold_c * DT_TEMPERATURE_WARNING_LIMIT) / 100)) {
+			UpdateStatus(DeviceDPTStatus_Warning);
 		} else if (max_temp_c > static_cast<int16_t>(max_fire_threshold_c)) {
 			LineState = GetTriggeredLineState();
 		} else {

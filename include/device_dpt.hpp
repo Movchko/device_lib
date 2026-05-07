@@ -20,13 +20,11 @@
 
 #define TRY_24V_SHORT_MS 5000
 
-enum DeviceDPTState {
-	DeviceDPTState_Idle,
-	DeviceDPTState_Error
-};
+#define DT_TEMPERATURE_WARNING_LIMIT 10 // в процентах
 
 enum DeviceDPTStatus {
 	DeviceDPTStatus_Idle,
+	DeviceDPTStatus_Warning,
 	DeviceDPTStatus_Error
 };
 
@@ -58,7 +56,6 @@ enum DeviceDPTMode {
 };
 
 class VDeviceDPT: public VDevice {
-	DeviceDPTState State;
 	DeviceDPTStatus Status;
 	void UpdateStatus(DeviceDPTStatus status);
 	uint32_t Counter1s;

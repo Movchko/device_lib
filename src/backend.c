@@ -362,8 +362,8 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		}break;
 		case ServiceCmd_DefaultConfig: { // restore defaults into local config
-			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 			DefaultConfig();
+			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		}break;
 	}
 }
