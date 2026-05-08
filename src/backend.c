@@ -53,6 +53,7 @@ __attribute__((weak)) void RcvReplyResumeExtinguishmentTimer(uint32_t MsgID,  ui
 __attribute__((weak)) void RcvSetSystemTime(uint8_t *MsgData);
 __attribute__((weak)) void ListenerCommandCB(uint32_t MsgID, uint8_t *MsgData);
 __attribute__((weak)) void USBSendData(uint8_t *Buf);
+__attribute__((weak)) void ResetConfig();
 /* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
 __attribute__((weak)) void CanSendOverError(void) { (void)0; }
 
@@ -361,8 +362,8 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 			SaveConfig();
 			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		}break;
-		case ServiceCmd_DefaultConfig: { // restore defaults into local config
-			DefaultConfig();
+		case ServiceCmd_StartSetConfig: { // restore defaults into local config
+			ResetConfig();
 			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		}break;
 	}
@@ -464,7 +465,7 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 		case ServiceCmd_GetConfigWord:
 		case ServiceCmd_SetConfigWord:
 		case ServiceCmd_SaveConfig:
-		case ServiceCmd_DefaultConfig: {
+		case ServiceCmd_StartSetConfig: {
 			if(dir & (Dev == 0)) // если от нас и нам, то исключаем (кольцо)
 				return;
 			else
