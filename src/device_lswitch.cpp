@@ -105,7 +105,7 @@ void VDeviceLimitSwitch::HandleActiveTransition(uint8_t active_now) {
 
 		case DeviceLimitSwitchFunction_PauseStart:
 			if (!pauseSent) {
-				SetPauseExtinguishmentTimer(0u); /* broadcast */
+				SetPauseExtinguishmentTimer(Num);
 				pauseSent = 1u;
 			}
 			break;
@@ -116,7 +116,7 @@ void VDeviceLimitSwitch::HandleActiveTransition(uint8_t active_now) {
 	} else {
 		faultOutputArmed = 0u;
 		if (functionMode == DeviceLimitSwitchFunction_PauseStart && pauseSent) {
-			SetResumeExtinguishmentTimer(0u); /* снимаем паузу при возврате концевика */
+			SetResumeExtinguishmentTimer(Num); /* снимаем паузу при возврате концевика */
 			pauseSent = 0u;
 		}
 	}

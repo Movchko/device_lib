@@ -366,6 +366,10 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 			ResetConfig();
 			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
 		}break;
+		case ServiceCmd_DefaultConfig: {
+			DefaultConfig();
+			SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
+		}break;
 	}
 }
 
@@ -465,7 +469,8 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 		case ServiceCmd_GetConfigWord:
 		case ServiceCmd_SetConfigWord:
 		case ServiceCmd_SaveConfig:
-		case ServiceCmd_StartSetConfig: {
+		case ServiceCmd_StartSetConfig:
+		case ServiceCmd_DefaultConfig: {
 			if(dir & (Dev == 0)) // если от нас и нам, то исключаем (кольцо)
 				return;
 			else
@@ -544,27 +549,27 @@ void SetStopExtinguishment() {
     SendMessageFull(can_id, data, 1, BUS_CAN12);
 }
 
-void SetPauseExtinguishmentTimer(uint8_t zone) {
+void SetPauseExtinguishmentTimer(uint8_t dev) {
 	can_ext_id_t can_id;
-	uint8_t data[8] = {ServiceCmd_Fire_PauseExtinguishmentTimer, zone, 0, 0, 0, 0, 0, 0};
+	uint8_t data[8] = {ServiceCmd_Fire_PauseExtinguishmentTimer, dev, 0, 0, 0, 0, 0, 0};
 	can_id.ID = 0;
 	can_id.field.dir = 1;
-	can_id.field.d_type = 0;
-	can_id.field.h_adr = 0;
-	can_id.field.l_adr = 0;
-	can_id.field.zone = zone;
+	can_id.field.d_type = BoardDevicesList[dev].d_type;
+	can_id.field.h_adr = BoardDevicesList[dev].h_adr;
+	can_id.field.l_adr = BoardDevicesList[dev].l_adr;
+	can_id.field.zone = BoardDevicesList[dev].zone;
 	SendMessageFull(can_id, data, 1, BUS_CAN12);
 }
 
-void SetResumeExtinguishmentTimer(uint8_t zone) {
+void SetResumeExtinguishmentTimer(uint8_t dev) {
 	can_ext_id_t can_id;
-	uint8_t data[8] = {ServiceCmd_Fire_ResumeExtinguishmentTimer, zone, 0, 0, 0, 0, 0, 0};
+	uint8_t data[8] = {ServiceCmd_Fire_ResumeExtinguishmentTimer, dev, 0, 0, 0, 0, 0, 0};
 	can_id.ID = 0;
 	can_id.field.dir = 1;
-	can_id.field.d_type = 0;
-	can_id.field.h_adr = 0;
-	can_id.field.l_adr = 0;
-	can_id.field.zone = zone;
+	can_id.field.d_type = BoardDevicesList[dev].d_type;
+	can_id.field.h_adr = BoardDevicesList[dev].h_adr;
+	can_id.field.l_adr = BoardDevicesList[dev].l_adr;
+	can_id.field.zone = BoardDevicesList[dev].zone;
 	SendMessageFull(can_id, data, 1, BUS_CAN12);
 }
 

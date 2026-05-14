@@ -81,7 +81,6 @@ enum ServiceCmd {
 	ServiceCmd_SaveConfig 			= 154,
 	ServiceCmd_StartSetConfig 		= 155,
 
-
 	ServiceCmd_SetUpdateWord        = 156,
 
 	ServiceCmd_SetSystemTime		= 157, // команда установки системного времени
@@ -89,6 +88,8 @@ enum ServiceCmd {
 	ServiceCmd_GetVersion           = 159, // команда запроса версии
 	ServiceCmd_StartDevice			= 160, // команда от устройства при запуске
 	ServiceCmd_PositionDevice		= 161, // команда "веса" устройства
+
+	ServiceCmd_DefaultConfig	 	= 162,
 
 	ServiceCmd_CircSetAdr 		= 200,
 };
@@ -119,7 +120,7 @@ void SetStartExtinguishment(uint8_t zone, uint8_t zone_delay, uint8_t module_del
 void SetReplyStartExtinguishment(uint8_t dev);
 void SetStopExtinguishment();
 void SetReplyStopExtinguishment(uint8_t dev);
-void SetPauseExtinguishmentTimer(uint8_t zone);
+void SetPauseExtinguishmentTimer(uint8_t dev);
 void SetReplyPauseExtinguishmentTimer(uint8_t dev);
 void SetResumeExtinguishmentTimer(uint8_t zone);
 void SetReplyResumeExtinguishmentTimer(uint8_t dev);

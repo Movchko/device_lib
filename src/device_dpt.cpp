@@ -32,6 +32,7 @@ VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
 	probeAfterShort = 0;
 	probeTimerMs = 0;
 	was_fire = 0;
+	Num = ChNum;
 }
 
 DeviceDPTLineState VDeviceDPT::GetTriggeredLineState() const {

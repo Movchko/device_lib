@@ -111,7 +111,7 @@ protected:
 
 public:
 	VDeviceDPT(uint8_t ChNum);
-
+	uint8_t Num;
 	uint8_t GetDT();
 	void Init();
 	void Process();
