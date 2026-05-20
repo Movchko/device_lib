@@ -198,8 +198,8 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
         # Формат статуса ППКУ (через backend, см. AppSetStatus):
         # CAN data[0]   = Code (статус)
         # CAN data[1]   = status_sec_cnt (секунды с запуска, modulo 256)
-        # CAN data[2]   = power (канал 4)   — шаг 100 мВ (code * 0.1 В, 198 -> 19.8 В)
-        # CAN data[3]   = Rpower (канал 0) — шаг 100 мВ
+        # CAN data[2]   = power (канал 4)   — шаг 1 В
+        # CAN data[3]   = Rpower (канал 0) — шаг 1 В
         # CAN data[4]   = current1         — шаг 50 мА (code * 0.05 А)
         # CAN data[5]   = current2         — шаг 50 мА
         if len(data) >= 6:
@@ -208,12 +208,12 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
             rpower_code = data[3]
             cur1_code = data[4]
             cur2_code = data[5]
-            u = power_code / 10.0      # В
-            ur = rpower_code / 10.0    # В
+            u = float(power_code)      # В
+            ur = float(rpower_code)    # В
             i1 = cur1_code * 0.05      # А
             i2 = cur2_code * 0.05      # А
             return _dev_line(
-                f"  {dev_str} | t={sec}s U={u:.1f}V U_res={ur:.1f}V I1={i1:.2f}A I2={i2:.2f}A"
+                f"  {dev_str} | t={sec}s U={u:.0f}V U_res={ur:.0f}V I1={i1:.2f}A I2={i2:.2f}A"
             )
         return _dev_line(f"  {dev_str} | PPKY status (len={len(data)})")
     if parsed["d_type"] == 11 and parsed["dir"]:  # Спичка →
@@ -285,20 +285,19 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
             return _dev_line(f"  {dev_str} | pos={actual} expected={desired} {err}")
         return _dev_line(f"  {dev_str} | Relay status (len={len(data)})")
     if parsed["d_type"] in (13, 14, 20, 21, 22, 23) and parsed["dir"]:
-        # МКУ → (tick 4b LE, CAN flags в data[5], для K1/K2 также U24 в data[6])
+        # МКУ → [data1]=seconds, [data2..4]=reserved, [data5]=CAN flags, [data6]=U24 (1V), [data7]=CAN state
         if len(data) >= 6:
-            # status_data[0..3]=tick LE, [4]=CAN_flags → SendMessage: data[0]=cmd, data[1..4]=tick, data[5]=flags
-            tick = struct.unpack_from("<I", data, 1)[0]
+            sec = int(data[1])
             can_flags = int(data[5])  # явно int на случай list/array
             can1 = "✓" if (can_flags & 0x01) else "—"
             can2 = "✓" if (can_flags & 0x02) else "—"
             if parsed["d_type"] in (20, 21, 22, 23) and len(data) >= 7:
-                u24_code_01v = int(data[6])  # 0.1V шаг как у ППКУ
-                u24_v = u24_code_01v / 10.0
+                u24_code_1v = int(data[6])
+                u24_v = float(u24_code_1v)
                 return _dev_line(
-                    f"  {dev_str} | tick={tick} CAN1={can1} CAN2={can2} U24={u24_v:.1f}V"
+                    f"  {dev_str} | t={sec}s CAN1={can1} CAN2={can2} U24={u24_v:.0f}V"
                 )
-            return _dev_line(f"  {dev_str} | tick={tick} CAN1={can1} CAN2={can2}")
+            return _dev_line(f"  {dev_str} | t={sec}s CAN1={can1} CAN2={can2}")
         return _dev_line(f"  {dev_str} | heartbeat")
 
     # Обычный пакет

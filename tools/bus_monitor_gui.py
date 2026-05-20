@@ -523,17 +523,17 @@ class BusMonitorGUI:
             return None
 
         can_id = build_can_id(14, h, l, 0, 1)  # d_type=14 (МКУ_TC), dir=1
-        tick = int(time.time() * 1000) & 0xFFFFFFFF
+        sec = int(time.time()) & 0xFF
         can_mask = 0x03  # CAN1+CAN2 active
-        u24_code_01v = 198  # 19.8V
+        u24_code_1v = 20
         data = bytes([
             0,  # cmd=0 heartbeat/status
-            tick & 0xFF,
-            (tick >> 8) & 0xFF,
-            (tick >> 16) & 0xFF,
-            (tick >> 24) & 0xFF,
+            sec,
+            0,
+            0,
+            0,
             can_mask,
-            u24_code_01v,
+            u24_code_1v,
             0,
         ])
         return can_id, data
@@ -692,11 +692,26 @@ class BusMonitorGUI:
         except ValueError:
             self.msg_queue.put({"log": "[!] Неверный адрес спички (h_adr, l_adr)"})
             return
-        can_id = build_can_id(11, h, l, 0, 0)  # d_type=11 (Спичка), dir=0 (запрос)
+        zone = self._find_active_device_zone_exact(11, h, l)
+        used_fallback = False
+        if zone is None:
+            zone = 0
+            used_fallback = True
+
+        can_id = build_can_id(11, h, l, zone, 0)  # d_type=11 (Спичка), dir=0 (запрос)
         data = bytes([10]) + b"\x00" * 7  # cmd=10 — Запуск
         pkt = build_bsu_can_packet(can_id, data)
-        self.ser.write(pkt)
-        self.msg_queue.put({"log": f">> Спичка (h={h}, l={l}) Запуск"})
+        try:
+            with self._serial_lock:
+                self.ser.write(pkt)
+        except Exception as e:
+            self.msg_queue.put({"log": f"[!] Write failed (IgniterStart): {e}"})
+            return
+
+        if used_fallback:
+            self.msg_queue.put({"log": f">> Спичка (h={h}, l={l}) Запуск, zone=0 (fallback: нет свежего статуса)"})
+        else:
+            self.msg_queue.put({"log": f">> Спичка (h={h}, l={l}, zone={zone}) Запуск"})
 
     def _toggle_igniter_sc_check(self):
         """Переключить проверку КЗ у спички (cmd=11, val: 0=вкл проверку, 1=выкл)."""
@@ -714,17 +729,25 @@ class BusMonitorGUI:
         # device_igniter.cpp: 0 - проверка КЗ включена, 1 - отключена
         val = 0 if self.igniter_sc_check_enabled else 1
 
-        can_id = build_can_id(11, h, l, 0, 0)  # d_type=11 (Спичка), dir=0 (запрос)
+        zone = self._find_active_device_zone_exact(11, h, l)
+        if zone is None:
+            zone = 0
+        can_id = build_can_id(11, h, l, zone, 0)  # d_type=11 (Спичка), dir=0 (запрос)
         data = bytes([11, val]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)
-        self.ser.write(pkt)
+        try:
+            with self._serial_lock:
+                self.ser.write(pkt)
+        except Exception as e:
+            self.msg_queue.put({"log": f"[!] Write failed (IgniterSC): {e}"})
+            return
 
         if self.igniter_sc_check_enabled:
             self.igniter_sc_btn.config(text="Проверка КЗ: ВКЛ")
-            self.msg_queue.put({"log": f">> Спичка (h={h}, l={l}) проверка КЗ ВКЛ (cmd=11, val=0)"})
+            self.msg_queue.put({"log": f">> Спичка (h={h}, l={l}, zone={zone}) проверка КЗ ВКЛ (cmd=11, val=0)"})
         else:
             self.igniter_sc_btn.config(text="Проверка КЗ: ВЫКЛ")
-            self.msg_queue.put({"log": f">> Спичка (h={h}, l={l}) проверка КЗ ВЫКЛ (cmd=11, val=1)"})
+            self.msg_queue.put({"log": f">> Спичка (h={h}, l={l}, zone={zone}) проверка КЗ ВЫКЛ (cmd=11, val=1)"})
 
     def _send_relay_set(self, state: int):
         """Отправить команду реле cmd=10 с параметром state (0/1)."""
@@ -753,7 +776,7 @@ class BusMonitorGUI:
         """Найти актуальные l_adr и zone по последним активным статусам устройства."""
         now = time.time()
         matches: list[tuple[int, int, float]] = []
-        for (dt, ha, la, zn), (_, last_seen) in self.device_statuses.items():
+        for (dt, ha, la, zn, _cmd_key), (_, last_seen) in self.device_statuses.items():
             if dt != d_type or ha != h_adr:
                 continue
             if now - last_seen > self.status_idle_timeout:
@@ -767,6 +790,24 @@ class BusMonitorGUI:
         matches.sort(key=lambda x: x[2], reverse=True)
         l_adr, zone, _ = matches[0]
         return l_adr, zone
+
+    def _find_active_device_zone_exact(self, d_type: int, h_adr: int, l_adr: int) -> int | None:
+        """Найти актуальную zone для точного адреса устройства (type+h_adr+l_adr)."""
+        now = time.time()
+        matches: list[tuple[int, float]] = []
+        for (dt, ha, la, zn, _cmd_key), (_, last_seen) in self.device_statuses.items():
+            if dt != d_type or ha != h_adr or la != l_adr:
+                continue
+            if now - last_seen > self.status_idle_timeout:
+                continue
+            matches.append((zn, last_seen))
+
+        if not matches:
+            return None
+
+        matches.sort(key=lambda x: x[1], reverse=True)
+        zone, _ = matches[0]
+        return zone
 
     def _send_mcu_set_zone(self):
         """Задать зону МКУ: cmd=20, data[1]=zone."""
@@ -793,24 +834,37 @@ class BusMonitorGUI:
             return
 
         addr = self._find_active_device_addr(d_type, h_adr)
+        used_fallback = False
         if addr is None:
-            self.msg_queue.put({
-                "log": f"[!] Нет активного устройства type={d_type}, h_adr={h_adr}. "
-                       f"Дождитесь его статуса на шине."
-            })
-            return
-        l_adr, current_zone = addr
+            # Fallback: команда назначения зоны должна отправляться даже если в GUI
+            # ещё нет свежего статуса устройства (или конвертер подключили позже).
+            # Для МКУ используем базовый адрес l_adr=0 и широкую зону=0.
+            l_adr, current_zone = 0, 0
+            used_fallback = True
+        else:
+            l_adr, current_zone = addr
 
         can_id = build_can_id(d_type, h_adr, l_adr, current_zone, 0)
         data = bytes([20, zone]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)
-        self.ser.write(pkt)
+        try:
+            with self._serial_lock:
+                self.ser.write(pkt)
+        except Exception as e:
+            self.msg_queue.put({"log": f"[!] Write failed (SetZone): {e}"})
+            return
 
         dev_name = DEVICE_NAMES.get(d_type, f"Type{d_type}")
-        self.msg_queue.put({
-            "log": f">> {dev_name} (type={d_type}, h={h_adr}, l={l_adr}, zone_cur={current_zone}) "
-                   f"set zone={zone} (cmd=20)"
-        })
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> {dev_name} (type={d_type}, h={h_adr}) set zone={zone} (cmd=20), "
+                       f"fallback addr l=0 zone=0 (нет свежего статуса в GUI)"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> {dev_name} (type={d_type}, h={h_adr}, l={l_adr}, zone_cur={current_zone}) "
+                       f"set zone={zone} (cmd=20)"
+            })
 
     def _send_get_config_crc_saved(self):
         """CRC сохранённой копии конфигурации (SavedCfgptr, MsgData[0]=0)."""
