@@ -34,6 +34,7 @@ BSU_HEADER_SIZE = 8
 BSU_CAN_PAYLOAD = 12  # 4 id + 8 data
 BSU_CHECKSUM_SIZE = 2
 BSU_CAN_PKT_SIZE = BSU_HEADER_SIZE + BSU_CAN_PAYLOAD + BSU_CHECKSUM_SIZE
+BSU_MAX_PKT_SIZE = 128
 BSU_PKT_TYPE_CAN = 0
 BSU_PKT_TYPE_CAN2 = 1
 
@@ -349,6 +350,11 @@ class BSUParser:
         if self.state == "SIZE_HI":
             self.size |= b << 8
             self.checksum_acc += b
+            # Ограничение размера: не принимаем заведомо некорректные/битые длины.
+            # При size > 128 сразу возвращаемся к поиску преамбулы.
+            if self.size < (BSU_HEADER_SIZE + BSU_CHECKSUM_SIZE) or self.size > BSU_MAX_PKT_SIZE:
+                self.state = "PREAMBLE_0"
+                return None
             self.state = "TYPE_LO"
             return None
 
@@ -372,7 +378,15 @@ class BSUParser:
         if self.state == "SEQ_HI":
             self.checksum_acc += b
             self.total = self.size - BSU_HEADER_SIZE - BSU_CHECKSUM_SIZE
-            if self.total < 12 or self.type_val not in (BSU_PKT_TYPE_CAN, BSU_PKT_TYPE_CAN2):
+            # Защита от рассинхронизации потока:
+            # принимаем только кадр фиксированного размера BSU_CAN_PKT_SIZE (22 байта).
+            # Иначе один битый байт в size/type может "залипнуть" парсер в BODY
+            # на сотни байт и визуально дать паузу RX на секунды.
+            if (
+                self.size != BSU_CAN_PKT_SIZE
+                or self.total != BSU_CAN_PAYLOAD
+                or self.type_val not in (BSU_PKT_TYPE_CAN, BSU_PKT_TYPE_CAN2)
+            ):
                 self.state = "PREAMBLE_0"
                 return None
             self.bus_label = "CAN2" if self.type_val == BSU_PKT_TYPE_CAN2 else "CAN1"
@@ -519,7 +533,6 @@ def run_read_config(ser, bsu: BSUParser, h_adr: int | None, l_adr: int = 0, zone
 
     # 2. GetConfigWord по каждому слову (перезапрос каждые 5 мс при отсутствии ответа)
     for i in range(num_words):
-        ser.reset_input_buffer()
         req = bytes([SVC_GET_CONFIG_WORD, (i >> 8) & 0xFF, i & 0xFF]) + b"\x00" * 5
         ts_req = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         print(f">> REQ [{ts_req}] GetConfigWord word#{i}  data=[{req.hex()}]")
@@ -578,23 +591,36 @@ def read_config_bytes(
       - затем байты fire_and[ZONE_NUMBER].
     """
     d_type = DEVICE_PPKY_TYPE
-    can_id_req = build_can_id(d_type, h_adr, l_adr, zone, 0)
-    can_id_rsp = build_can_id(d_type, h_adr, l_adr, zone, 1)
+    current_h_adr = h_adr
+    can_id_req = build_can_id(d_type, current_h_adr, l_adr, zone, 0)
 
-    def send_req(data: bytes) -> None:
-        pkt = build_bsu_can_packet(can_id_req, data)
+    def send_req(data: bytes, broadcast: bool = False) -> None:
+        # Для сервисного чтения конфига надёжнее broadcast-запрос:
+        # ответ всё равно приходит от конкретного ППКУ (dir=1), а адрес
+        # можно извлечь из ответа и зафиксировать в current_h_adr.
+        req_id = build_can_id(d_type, 0, 0, 0, 0) if broadcast else can_id_req
+        pkt = build_bsu_can_packet(req_id, data)
         ser.write(pkt)
 
-    RETRY_TIMEOUT_MS = 0.005
-    TOTAL_TIMEOUT_SEC = 2.0
+    # Для WiFi/TCP задержки заметно выше, чем для USB-UART.
+    # Слишком частый перезапрос может перегружать конвертер и "душить" ответы.
+    RETRY_TIMEOUT_MS = 0.02
+    TOTAL_TIMEOUT_SEC = 5.0
 
-    def wait_response(req_data: bytes, expected_cmd: int, expected_word_idx: int | None = None) -> bytes | None:
+    def wait_response(
+        req_data: bytes,
+        expected_cmd: int,
+        expected_word_idx: int | None = None,
+        broadcast_req: bool = False,
+        accept_any_ppky_addr: bool = True,
+    ) -> bytes | None:
+        nonlocal current_h_adr, can_id_req
         old_timeout = ser.timeout
         ser.timeout = 0  # non-blocking
         deadline = time.time() + TOTAL_TIMEOUT_SEC
         try:
             while time.time() < deadline:
-                send_req(req_data)
+                send_req(req_data, broadcast=broadcast_req)
                 retry_deadline = time.time() + RETRY_TIMEOUT_MS
                 while time.time() < retry_deadline:
                     chunk = ser.read(512)
@@ -603,21 +629,31 @@ def read_config_bytes(
                         if result:
                             rid = result[0]
                             rdata = result[1]
-                            if rid == can_id_rsp and len(rdata) > 0 and rdata[0] == expected_cmd:
-                                if expected_word_idx is not None and len(rdata) >= 3:
-                                    got_idx = (rdata[1] << 8) | rdata[2]
-                                    if got_idx != expected_word_idx:
-                                        continue
-                                return rdata
+                            if len(rdata) == 0 or rdata[0] != expected_cmd:
+                                continue
+
+                            p = parse_can_id(rid)
+                            if p["d_type"] != d_type or p["dir"] != 1:
+                                continue
+
+                            if accept_any_ppky_addr:
+                                current_h_adr = p["h_adr"]
+                                can_id_req = build_can_id(d_type, current_h_adr, l_adr, zone, 0)
+
+                            if expected_word_idx is not None and len(rdata) >= 3:
+                                got_idx = (rdata[1] << 8) | rdata[2]
+                                if got_idx != expected_word_idx:
+                                    continue
+                            return rdata
                     if not chunk:
-                        pass
+                        time.sleep(0.001)
         finally:
             ser.timeout = old_timeout
         return None
 
     # --- 0. Узнаём полный размер конфига ---
     req = bytes([SVC_GET_CONFIG_SIZE]) + b"\x00" * 7
-    rsp = wait_response(req, SVC_GET_CONFIG_SIZE)
+    rsp = wait_response(req, SVC_GET_CONFIG_SIZE, broadcast_req=True, accept_any_ppky_addr=True)
     if not rsp or len(rsp) < 5:
         return (None, 0)
     size_bytes = ((rsp[1] << 24) |
@@ -637,6 +673,8 @@ def read_config_bytes(
     zone_name_offset = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKUCFG_STRIDE
 
     num_words = (size_bytes + 3) // 4
+    if progress_callback:
+        progress_callback(0, 0, num_words)
 
     # Кэш прочитанных слов: word_idx -> uint32
     cache: dict[int, int] = {}
@@ -647,9 +685,8 @@ def read_config_bytes(
             return cache[idx]
         if idx < 0 or idx >= num_words:
             return None
-        ser.reset_input_buffer()
         req = bytes([SVC_GET_CONFIG_WORD, (idx >> 8) & 0xFF, idx & 0xFF]) + b"\x00" * 5
-        rsp = wait_response(req, SVC_GET_CONFIG_WORD, expected_word_idx=idx)
+        rsp = wait_response(req, SVC_GET_CONFIG_WORD, expected_word_idx=idx, broadcast_req=True)
         if not rsp or len(rsp) < 7:
             return None
         word = struct.unpack(">I", rsp[3:7])[0]

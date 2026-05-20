@@ -10,6 +10,7 @@ import sys
 import threading
 import queue
 import time
+import socket
 from datetime import datetime
 from tkinter import (
     Tk, ttk, Frame, Label, Button, Entry, Text, Scrollbar,
@@ -42,6 +43,59 @@ from bus_monitor import (
     IGNITER_LINE,
 )
 
+WIFI_DEFAULT_HOST = "192.168.4.1"
+WIFI_DEFAULT_PORT = "23"
+
+
+class TcpSerialCompat:
+    """Минимальная обертка сокета под интерфейс serial.Serial (read/write/timeout/is_open)."""
+
+    def __init__(self, sock: socket.socket):
+        self._sock = sock
+        self.timeout = 0.01
+        self.is_open = True
+
+    def read(self, size: int = 1) -> bytes:
+        if not self.is_open:
+            return b""
+        try:
+            self._sock.settimeout(self.timeout)
+            data = self._sock.recv(size)
+            if data == b"":
+                self.is_open = False
+            return data
+        except socket.timeout:
+            return b""
+
+    def write(self, data: bytes) -> int:
+        if not self.is_open:
+            raise OSError("TCP socket is closed")
+        self._sock.sendall(data)
+        return len(data)
+
+    def reset_input_buffer(self):
+        if not self.is_open:
+            return
+        self._sock.setblocking(False)
+        try:
+            while True:
+                chunk = self._sock.recv(1024)
+                if not chunk:
+                    break
+        except (BlockingIOError, InterruptedError):
+            pass
+        finally:
+            self._sock.setblocking(True)
+
+    def close(self):
+        if not self.is_open:
+            return
+        self.is_open = False
+        try:
+            self._sock.close()
+        except OSError:
+            pass
+
 
 class BusMonitorGUI:
     def __init__(self, default_port: str = ""):
@@ -64,12 +118,17 @@ class BusMonitorGUI:
         self._refresh_pending = False
         self._last_igniter_status_ts = 0.0
         self._igniter_status_interval_s = 0.05
+        self._rx_silence_reset_s = 2.0
+        self._rx_stall_warn_s = 3.0
         self.bsu = BSUParser(be_id=False)
 
         self.can_id_req: int | None = None
         self.can_id_rsp: int | None = None
         self._h_adr_auto_detected = False
         self.h_adr_var = StringVar(value="0")
+        self.conn_mode_var = StringVar(value="USB (COM)")
+        self.wifi_host_var = StringVar(value=WIFI_DEFAULT_HOST)
+        self.wifi_port_var = StringVar(value=WIFI_DEFAULT_PORT)
         self.word_var = StringVar(value="0")
         # Тест «ПОЖАР от МКУ_ТС»: h_adr в CAN всегда 1; зона — индекс как в ППКУ (0…), в ID уходит +1 (0 в ID = все зоны)
         self.mcu_tc_fire_zone_var = StringVar(value="0")
@@ -99,7 +158,9 @@ class BusMonitorGUI:
         self.cfg_crc_local_var = StringVar(value="—")
         self._last_crc_request: str | None = None
         self.device_statuses: dict[tuple[int, int, int, int, int], tuple[str, float]] = {}  # key -> (line, last_seen_time)
-        self.status_idle_timeout = 15.0  # сек — убирать записи без посылок дольше 15 с
+        # Это только UI-таймаут видимости устройств, НЕ таймаут соединения.
+        # 15 с давали ложное ощущение "обрыва связи" на нестабильном WiFi.
+        self.status_idle_timeout = 60.0  # сек — убирать записи без посылок дольше 60 с
 
         self._build_ui(default_port)
         self.root.after(50, self._process_queue)
@@ -114,12 +175,29 @@ class BusMonitorGUI:
         conn_frame = Frame(main)
         conn_frame.pack(fill=X, pady=(0, 8))
 
+        Label(conn_frame, text="Режим:").pack(side=LEFT, padx=(0, 4))
+        self.conn_mode_combo = ttk.Combobox(
+            conn_frame,
+            textvariable=self.conn_mode_var,
+            values=("USB (COM)", "WiFi (TCP)"),
+            state="readonly",
+            width=11,
+        )
+        self.conn_mode_combo.pack(side=LEFT, padx=(0, 8))
+
         Label(conn_frame, text="Порт:").pack(side=LEFT, padx=(0, 4))
         ports = [p.device for p in serial.tools.list_ports.comports()]
         self.port_var = StringVar(value=default_port or (ports[0] if ports else ""))
         self.port_combo = ttk.Combobox(conn_frame, textvariable=self.port_var, width=12)
         self.port_combo["values"] = ports
         self.port_combo.pack(side=LEFT, padx=(0, 8))
+
+        Label(conn_frame, text="IP:").pack(side=LEFT, padx=(8, 2))
+        self.wifi_host_entry = Entry(conn_frame, textvariable=self.wifi_host_var, width=12)
+        self.wifi_host_entry.pack(side=LEFT, padx=(0, 6))
+        Label(conn_frame, text="Port:").pack(side=LEFT, padx=(0, 2))
+        self.wifi_port_entry = Entry(conn_frame, textvariable=self.wifi_port_var, width=5)
+        self.wifi_port_entry.pack(side=LEFT, padx=(0, 8))
 
         Label(conn_frame, text="h_adr ППКУ:").pack(side=LEFT, padx=(8, 4))
         Entry(conn_frame, textvariable=self.h_adr_var, width=5).pack(side=LEFT, padx=(0, 8))
@@ -437,22 +515,46 @@ class BusMonitorGUI:
             self._connect()
 
     def _connect(self):
-        port = self.port_var.get().strip()
-        if not port:
-            self.msg_queue.put({"log": "[!] Укажите COM-порт"})
-            return
+        mode = (self.conn_mode_var.get() or "").strip()
         try:
-            # timeout/write_timeout нужны, чтобы при проблемах драйвера или бурсте трафика UI не "зависал" навсегда.
-            self.ser = serial.Serial(port, 1000000, timeout=0.01, write_timeout=0.5)
+            if mode == "WiFi (TCP)":
+                host = (self.wifi_host_var.get() or "").strip()
+                port_txt = (self.wifi_port_var.get() or "").strip()
+                if not host:
+                    self.msg_queue.put({"log": "[!] Укажите IP WiFi-конвертера"})
+                    return
+                try:
+                    tcp_port = int(port_txt)
+                except ValueError:
+                    self.msg_queue.put({"log": "[!] Неверный TCP порт"})
+                    return
+                sock = socket.create_connection((host, tcp_port), timeout=2.0)
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                self.ser = TcpSerialCompat(sock)
+                self.msg_queue.put({"log": f"[*] Подключено по TCP {host}:{tcp_port} (SSID: Pult_bsu4)"})
+            else:
+                port = self.port_var.get().strip()
+                if not port:
+                    self.msg_queue.put({"log": "[!] Укажите COM-порт"})
+                    return
+                # timeout/write_timeout нужны, чтобы при проблемах драйвера или бурсте трафика UI не "зависал" навсегда.
+                self.ser = serial.Serial(port, 1000000, timeout=0.01, write_timeout=0.5)
+                self.msg_queue.put({"log": f"[*] Подключено к {port}"})
+
             self._update_can_ids()
+            # Новый сеанс — новый парсер, чтобы не тащить состояние после прошлой сессии.
+            self.bsu = BSUParser(be_id=False)
             self.reader_stop.clear()
             self.device_statuses.clear()
             self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
             self.reader_thread.start()
             self.connect_btn.config(text="Отключить")
+            self.conn_mode_combo.config(state=DISABLED)
             self.port_combo.config(state=DISABLED)
-            self.msg_queue.put({"log": f"[*] Подключено к {port}"})
-        except serial.SerialException as e:
+            self.wifi_host_entry.config(state=DISABLED)
+            self.wifi_port_entry.config(state=DISABLED)
+        except (serial.SerialException, OSError, socket.timeout) as e:
             self.msg_queue.put({"log": f"[!] Ошибка: {e}"})
 
     def _disconnect(self):
@@ -463,10 +565,29 @@ class BusMonitorGUI:
             self.ser.close()
             self.ser = None
         self.connect_btn.config(text="Подключить")
+        self.conn_mode_combo.config(state="readonly")
         self.port_combo.config(state=NORMAL)
+        self.wifi_host_entry.config(state=NORMAL)
+        self.wifi_port_entry.config(state=NORMAL)
         self._h_adr_auto_detected = False
         self.dpt_emul_enabled_var.set(False)
         self.msg_queue.put({"log": "[*] Отключено"})
+
+    def _is_wifi_transport(self) -> bool:
+        return isinstance(self.ser, TcpSerialCompat) and self.ser.is_open
+
+    def _write_packet(self, pkt: bytes, context: str = "") -> bool:
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return False
+        try:
+            with self._serial_lock:
+                self.ser.write(pkt)
+            return True
+        except Exception as e:
+            suffix = f" ({context})" if context else ""
+            self.msg_queue.put({"log": f"[!] Write failed{suffix}: {e}"})
+            return False
 
     def _build_dpt_status_packet(self, line_state: int) -> tuple[int, bytes] | None:
         """Сформировать CAN ID и data для статуса ДПТ.
@@ -505,11 +626,7 @@ class BusMonitorGUI:
             return
         can_id, data = pkt_data
         pkt = build_bsu_can_packet(can_id, data)
-        try:
-            with self._serial_lock:
-                self.ser.write(pkt)
-        except Exception as e:
-            self.msg_queue.put({"log": f"[!] DPT emu write failed ({label}): {e}"})
+        if not self._write_packet(pkt, f"DPT emu {label}"):
             return
         self.msg_queue.put({"log": f">> DPT emu: {label} (h={self.dpt_h_var.get()}, l={self.dpt_l_var.get()})"})
 
@@ -546,11 +663,7 @@ class BusMonitorGUI:
             return
         can_id, data = pkt_data
         pkt = build_bsu_can_packet(can_id, data)
-        try:
-            with self._serial_lock:
-                self.ser.write(pkt)
-        except Exception as e:
-            self.msg_queue.put({"log": f"[!] MKU_TC emu write failed: {e}"})
+        if not self._write_packet(pkt, "MKU_TC emu"):
             return
 
     def _send_dpt_short_once(self):
@@ -577,12 +690,27 @@ class BusMonitorGUI:
             self.root.after(1000, self._dpt_emulation_tick)
 
     def _reader_loop(self):
+        last_rx_ts = time.time()
+        rx_stall_reported = False
         while not self.reader_stop.is_set() and self.ser and self.ser.is_open:
             try:
                 chunk = self.ser.read(512)
                 if not chunk:
+                    now = time.time()
+                    if (now - last_rx_ts) >= self._rx_stall_warn_s and not rx_stall_reported:
+                        rx_stall_reported = True
+                        self.msg_queue.put({"log": f"[!] RX тишина {now - last_rx_ts:.1f}с (TCP/WiFi или конвертер)"})
+                    # Защита от "залипания" парсера в промежуточном состоянии:
+                    # при длительной тишине сбрасываемся в поиск новой преамбулы.
+                    if (now - last_rx_ts) >= self._rx_silence_reset_s and getattr(self.bsu, "state", "PREAMBLE_0") != "PREAMBLE_0":
+                        self.bsu = BSUParser(be_id=False)
                     time.sleep(0.001)
                     continue
+                if rx_stall_reported:
+                    gap = time.time() - last_rx_ts
+                    self.msg_queue.put({"log": f"[*] RX восстановлен после паузы {gap:.1f}с"})
+                    rx_stall_reported = False
+                last_rx_ts = time.time()
                 for b in chunk:
                     result = self.bsu.feed(b)
                     if result:
@@ -622,12 +750,36 @@ class BusMonitorGUI:
             return
         self._update_can_ids()
         pkt = build_bsu_can_packet(self.can_id_req, data)
-        try:
-            with self._serial_lock:
-                self.ser.write(pkt)
-        except Exception as e:
-            self.msg_queue.put({"log": f"[!] Write failed ({label}): {e}"})
+        if not self._write_packet(pkt, label):
             return
+        self.msg_queue.put({"log": f">> {label}  data=[{data.hex()}]"})
+
+    def _send_ppky_query_with_broadcast_fallback(self, data: bytes, label: str):
+        """Отправить запрос ППКУ по выбранному h_adr и дополнительно broadсast (h=0).
+        Используется только для безопасных чтений (GetConfig*), чтобы WiFi-режим
+        не зависел от корректно введённого/автодетектнутого h_adr.
+        """
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+
+        self._update_can_ids()
+        pkt_main = build_bsu_can_packet(self.can_id_req, data)
+        if not self._write_packet(pkt_main, label):
+            return
+
+        try:
+            selected_h = int(self.h_adr_var.get() or "0")
+        except ValueError:
+            selected_h = 0
+
+        if selected_h != 0:
+            can_id_broadcast = build_can_id(DEVICE_PPKY_TYPE, 0, 0, 0, 0)
+            pkt_broadcast = build_bsu_can_packet(can_id_broadcast, data)
+            if self._write_packet(pkt_broadcast, f"{label} (broadcast)"):
+                self.msg_queue.put({"log": f">> {label}  data=[{data.hex()}] + fallback broadcast(h=0)"})
+                return
+
         self.msg_queue.put({"log": f">> {label}  data=[{data.hex()}]"})
 
     def _send_circ_set_adr(self):
@@ -649,7 +801,8 @@ class BusMonitorGUI:
         can_id_rt = build_can_id(0, 0, 0, 0, 0)  # широковещательно от ППКУ
         data_rt_on = bytes([130, 1]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id_rt, data_rt_on)
-        self.ser.write(pkt)
+        if not self._write_packet(pkt, "StopStartReTranslate on"):
+            return
         self.msg_queue.put({"log": ">> StopStartReTranslate: 1 (останов ретрансляции)"})
 
         # Небольшая пауза, чтобы все устройства обработали остановку ретрансляции
@@ -659,19 +812,21 @@ class BusMonitorGUI:
         can_id = build_can_id(13, 0, 0, 0, 0)  # d_type=13 (МКУ_IGN), dir=0 (запрос), h=0,l=0
         data = bytes([200, new_adr]) + b"\x00" * 6  # cmd=200 CircSetAdr, data[1]=new_adr
         pkt = build_bsu_can_packet(can_id, data)
-        self.ser.write(pkt)
+        if not self._write_packet(pkt, "CircSetAdr"):
+            return
         self.msg_queue.put({"log": f">> CircSetAdr: h=0 → new_h_adr={new_adr}"})
 
         # 3) Включить ретрансляцию обратно: StopStartReTranslate(130), data[1]=0
         data_rt_off = bytes([130, 0]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id_rt, data_rt_off)
-        self.ser.write(pkt)
+        if not self._write_packet(pkt, "StopStartReTranslate off"):
+            return
         self.msg_queue.put({"log": ">> StopStartReTranslate: 0 (возобновить ретрансляцию)"})
 
     def _send_get_config_size(self):
         """Запросить размер конфигурации ППКУ (в байтах)."""
         req = bytes([SVC_GET_CONFIG_SIZE]) + b"\x00" * 7
-        self._send(req, "GetConfigSize")
+        self._send_ppky_query_with_broadcast_fallback(req, "GetConfigSize")
 
     def _send_get_config_word(self):
         try:
@@ -701,11 +856,7 @@ class BusMonitorGUI:
         can_id = build_can_id(11, h, l, zone, 0)  # d_type=11 (Спичка), dir=0 (запрос)
         data = bytes([10]) + b"\x00" * 7  # cmd=10 — Запуск
         pkt = build_bsu_can_packet(can_id, data)
-        try:
-            with self._serial_lock:
-                self.ser.write(pkt)
-        except Exception as e:
-            self.msg_queue.put({"log": f"[!] Write failed (IgniterStart): {e}"})
+        if not self._write_packet(pkt, "IgniterStart"):
             return
 
         if used_fallback:
@@ -735,11 +886,7 @@ class BusMonitorGUI:
         can_id = build_can_id(11, h, l, zone, 0)  # d_type=11 (Спичка), dir=0 (запрос)
         data = bytes([11, val]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)
-        try:
-            with self._serial_lock:
-                self.ser.write(pkt)
-        except Exception as e:
-            self.msg_queue.put({"log": f"[!] Write failed (IgniterSC): {e}"})
+        if not self._write_packet(pkt, "IgniterSC"):
             return
 
         if self.igniter_sc_check_enabled:
@@ -763,7 +910,8 @@ class BusMonitorGUI:
         can_id = build_can_id(17, h, l, 0, 0)  # d_type=17 (Реле), dir=0 (запрос)
         data = bytes([10, 1 if state else 0]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)
-        self.ser.write(pkt)
+        if not self._write_packet(pkt, "RelaySet"):
+            return
         self.msg_queue.put({"log": f">> Реле (h={h}, l={l}) {'ВКЛ' if state else 'ВЫКЛ'}"})
 
     def _send_relay_on(self):
@@ -847,11 +995,7 @@ class BusMonitorGUI:
         can_id = build_can_id(d_type, h_adr, l_adr, current_zone, 0)
         data = bytes([20, zone]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)
-        try:
-            with self._serial_lock:
-                self.ser.write(pkt)
-        except Exception as e:
-            self.msg_queue.put({"log": f"[!] Write failed (SetZone): {e}"})
+        if not self._write_packet(pkt, "SetZone"):
             return
 
         dev_name = DEVICE_NAMES.get(d_type, f"Type{d_type}")
@@ -870,13 +1014,13 @@ class BusMonitorGUI:
         """CRC сохранённой копии конфигурации (SavedCfgptr, MsgData[0]=0)."""
         req = bytes([SVC_GET_CONFIG_CRC, 0]) + b"\x00" * 6
         self._last_crc_request = "saved"
-        self._send(req, "GetConfigCRC (Saved)")
+        self._send_ppky_query_with_broadcast_fallback(req, "GetConfigCRC (Saved)")
 
     def _send_get_config_crc_local(self):
         """CRC локальной копии конфигурации (LocalCfgptr, MsgData[0]=1)."""
         req = bytes([SVC_GET_CONFIG_CRC, 1]) + b"\x00" * 6
         self._last_crc_request = "local"
-        self._send(req, "GetConfigCRC (Local)")
+        self._send_ppky_query_with_broadcast_fallback(req, "GetConfigCRC (Local)")
 
     def _send_ppky_auto_address(self):
         """Запустить механизм автоматической установки адресов в ППКУ (команда 10).
@@ -946,7 +1090,8 @@ class BusMonitorGUI:
         can_id = build_can_id(14, h_adr_mcu, 0, zone_in_id, 1)  # DEVICE_MCU_TC_TYPE=14, dir=1
         data = bytes([140]) + b"\x00" * 7
         pkt = build_bsu_can_packet(can_id, data)
-        self.ser.write(pkt)
+        if not self._write_packet(pkt, "MKU_TC fire"):
+            return
         z_log = "все" if zone_in_id == 0 else str(z_idx)
         self.msg_queue.put(
             {"log": f">> МКУ_ТС ПОЖАР: h_adr={h_adr_mcu}, зона_ППКУ={z_log}, поле_zone_в_ID={zone_in_id}, cmd=140"}
@@ -985,7 +1130,8 @@ class BusMonitorGUI:
         can_id = build_can_id(DEVICE_PPKY_TYPE, h, 0, 0, 0)  # dir=0 запрос
         data = bytes([157, bcd_h, bcd_m, bcd_s, bcd_y, bcd_mon, bcd_day])
         pkt = build_bsu_can_packet(can_id, data)
-        self.ser.write(pkt)
+        if not self._write_packet(pkt, "SetSystemTime"):
+            return
         self.msg_queue.put({"log": f">> SetSystemTime: {hh:02d}:{mm:02d}:{ss:02d} "
                                    f"{day:02d}.{mon:02d}.{now.year:04d} (BCD)"})
 
@@ -999,15 +1145,36 @@ class BusMonitorGUI:
             h = 0
         self.msg_queue.put({"log": "[*] Чтение конфигурации..."})
         self.connect_btn.config(state=DISABLED)
+        self.config_text.config(state=NORMAL)
+        self.config_text.delete(1.0, END)
+        self.config_text.insert(END, "Чтение конфигурации: 0% (0/0 слов)")
+        self.config_text.config(state=DISABLED)
+
+        progress_state = {"last_pct": -1, "last_current": -1, "last_ts": 0.0}
 
         def progress_cb(pct: int, current: int, total: int):
+            now = time.time()
+            is_done = current >= total if total > 0 else False
+            # На WiFi процент долго может оставаться 0, поэтому показываем
+            # прогресс и по количеству слов (минимум раз в ~0.4с или каждые 64 слова).
+            pct_changed = (pct != progress_state["last_pct"])
+            words_advanced = (current - progress_state["last_current"]) >= 64
+            timed_flush = (now - progress_state["last_ts"]) >= 0.4
+            if not is_done and not (pct_changed or words_advanced or timed_flush):
+                return
+            progress_state["last_pct"] = pct
+            progress_state["last_current"] = current
+            progress_state["last_ts"] = now
             self.msg_queue.put({"config_progress": (pct, current, total)})
 
         def do_read():
             self.reader_stop.set()
             if self.reader_thread:
                 self.reader_thread.join(timeout=1.0)
-            cfg_bytes, size = read_config_bytes(self.ser, self.bsu, h, progress_callback=progress_cb)
+            # Для чтения конфига используем отдельный парсер, чтобы исключить
+            # влияние промежуточного состояния основного потока чтения.
+            cfg_parser = BSUParser(be_id=False)
+            cfg_bytes, size = read_config_bytes(self.ser, cfg_parser, h, progress_callback=progress_cb)
             self.reader_stop.clear()
             self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
             self.reader_thread.start()
