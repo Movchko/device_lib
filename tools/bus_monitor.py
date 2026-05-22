@@ -581,6 +581,9 @@ MIN_PPKY_CFG_BYTES = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES + ZONE_NAM
 def read_config_bytes(
     ser, bsu: BSUParser, h_adr: int, l_adr: int = 0, zone: int = 0,
     progress_callback=None,
+    word_burst_size: int = 128,
+    word_burst_collect_sec: float = 0.30,
+    word_burst_rounds: int = 3,
 ) -> tuple[bytes | None, int]:
     """
     Читает конфигурацию с ППКУ, возвращает (config_bytes, size) или (None, 0) при ошибке.
@@ -606,6 +609,9 @@ def read_config_bytes(
     # Слишком частый перезапрос может перегружать конвертер и "душить" ответы.
     RETRY_TIMEOUT_MS = 0.02
     TOTAL_TIMEOUT_SEC = 5.0
+    WORD_BURST_SIZE = max(1, int(word_burst_size))
+    WORD_BURST_COLLECT_SEC = max(0.01, float(word_burst_collect_sec))
+    WORD_BURST_ROUNDS = max(1, int(word_burst_rounds))
 
     def wait_response(
         req_data: bytes,
@@ -679,19 +685,73 @@ def read_config_bytes(
     # Кэш прочитанных слов: word_idx -> uint32
     cache: dict[int, int] = {}
 
+    def _collect_word_responses(wanted: set[int], collect_sec: float) -> None:
+        """Собрать ответы GetConfigWord из потока в cache по индексам wanted."""
+        if not wanted:
+            return
+        deadline = time.time() + collect_sec
+        while time.time() < deadline and wanted:
+            chunk = ser.read(1024)
+            if not chunk:
+                time.sleep(0.001)
+                continue
+            for b in chunk:
+                result = bsu.feed(b)
+                if not result:
+                    continue
+                rid = result[0]
+                rdata = result[1]
+                if len(rdata) < 7 or rdata[0] != SVC_GET_CONFIG_WORD:
+                    continue
+                p = parse_can_id(rid)
+                if p["d_type"] != d_type or p["dir"] != 1:
+                    continue
+                got_idx = (rdata[1] << 8) | rdata[2]
+                if got_idx not in wanted:
+                    continue
+                cache[got_idx] = struct.unpack(">I", rdata[3:7])[0]
+                wanted.discard(got_idx)
+
+    def fetch_words_burst(indices: list[int]) -> bool:
+        """Запросить пачку слов, затем дозапросить только пропущенные."""
+        pending = [idx for idx in indices if idx not in cache and 0 <= idx < num_words]
+        if not pending:
+            return True
+
+        # 1) Основные раунды burst-запросов
+        rounds = 0
+        while pending and rounds < WORD_BURST_ROUNDS:
+            rounds += 1
+            batch = pending[:WORD_BURST_SIZE]
+            wanted = set(batch)
+            for idx in batch:
+                req = bytes([SVC_GET_CONFIG_WORD, (idx >> 8) & 0xFF, idx & 0xFF]) + b"\x00" * 5
+                send_req(req, broadcast=False)
+            _collect_word_responses(wanted, WORD_BURST_COLLECT_SEC)
+            pending = [idx for idx in pending if idx not in cache]
+
+        # 2) Точечный дозапрос пропущенных индексов
+        for idx in pending:
+            req = bytes([SVC_GET_CONFIG_WORD, (idx >> 8) & 0xFF, idx & 0xFF]) + b"\x00" * 5
+            rsp = wait_response(req, SVC_GET_CONFIG_WORD, expected_word_idx=idx, broadcast_req=False)
+            if not rsp or len(rsp) < 7:
+                return False
+            cache[idx] = struct.unpack(">I", rsp[3:7])[0]
+        return True
+
     def fetch_word(idx: int) -> int | None:
         """Прочитать одно слово конфига по индексу (0..num_words-1) с кэшем."""
         if idx in cache:
             return cache[idx]
         if idx < 0 or idx >= num_words:
             return None
-        req = bytes([SVC_GET_CONFIG_WORD, (idx >> 8) & 0xFF, idx & 0xFF]) + b"\x00" * 5
-        rsp = wait_response(req, SVC_GET_CONFIG_WORD, expected_word_idx=idx, broadcast_req=True)
-        if not rsp or len(rsp) < 7:
+        # Для любого промаха кэша запрашиваем окно слов пачкой.
+        # Это ускоряет "умные" участки обхода (UID, имена зон, fire_and),
+        # где чтение идёт через fetch_word(), а не через store_word().
+        burst_end = min(idx + WORD_BURST_SIZE, num_words)
+        if not fetch_words_burst(list(range(idx, burst_end))):
             return None
-        word = struct.unpack(">I", rsp[3:7])[0]
-        cache[idx] = word
-        return word
+        return cache.get(idx)
 
     config = bytearray(size_bytes)
 

@@ -28,6 +28,7 @@ extern uint8_t USBSndBuf[CDCPKTLEN];
 #define BUS_CAN0		1
 #define BUS_CAN1		2
 #define BUS_CAN12		3
+#define BUS_UART1		4
 
 typedef union {
   uint32_t ID; /* Идентификатор в форме 32-х разрядного числа */
@@ -139,6 +140,7 @@ void RcvReplyResumeExtinguishmentTimer(uint32_t MsgID,  uint8_t *MsgData, uint8_
 // описать в главной программе
 void CANSendData(uint8_t *Buf);
 void USBSendData(uint8_t *Buf);
+void UARTSendData(uint8_t *Buf);
 
 /* Вызывается при переполнении очереди отправки; можно переопределить в приложении */
 void CanSendOverError(void);

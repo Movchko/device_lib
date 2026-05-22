@@ -64,7 +64,10 @@ class TcpSerialCompat:
             if data == b"":
                 self.is_open = False
             return data
-        except socket.timeout:
+        except (socket.timeout, BlockingIOError, InterruptedError):
+            return b""
+        except OSError:
+            self.is_open = False
             return b""
 
     def write(self, data: bytes) -> int:
@@ -130,6 +133,9 @@ class BusMonitorGUI:
         self.wifi_host_var = StringVar(value=WIFI_DEFAULT_HOST)
         self.wifi_port_var = StringVar(value=WIFI_DEFAULT_PORT)
         self.word_var = StringVar(value="0")
+        self.cfg_burst_size_var = StringVar(value="512")
+        self.cfg_burst_collect_ms_var = StringVar(value="500")
+        self.cfg_burst_rounds_var = StringVar(value="3")
         # Тест «ПОЖАР от МКУ_ТС»: h_adr в CAN всегда 1; зона — индекс как в ППКУ (0…), в ID уходит +1 (0 в ID = все зоны)
         self.mcu_tc_fire_zone_var = StringVar(value="0")
         self.igniter_h_var = StringVar(value="1")
@@ -157,6 +163,7 @@ class BusMonitorGUI:
         self.cfg_crc_saved_var = StringVar(value="—")
         self.cfg_crc_local_var = StringVar(value="—")
         self._last_crc_request: str | None = None
+        self._config_read_started_at: float | None = None
         self.device_statuses: dict[tuple[int, int, int, int, int], tuple[str, float]] = {}  # key -> (line, last_seen_time)
         # Это только UI-таймаут видимости устройств, НЕ таймаут соединения.
         # 15 с давали ложное ощущение "обрыва связи" на нестабильном WiFi.
@@ -242,6 +249,12 @@ class BusMonitorGUI:
         Button(cmd_frame, text="GetConfigWord", command=self._send_get_config_word).pack(side=LEFT, padx=(0, 8))
 
         Button(cmd_frame, text="Считать весь конфиг", command=self._read_full_config).pack(side=LEFT, padx=(8, 0))
+        Label(cmd_frame, text="burst").pack(side=LEFT, padx=(12, 2))
+        Entry(cmd_frame, textvariable=self.cfg_burst_size_var, width=4).pack(side=LEFT, padx=(0, 4))
+        Label(cmd_frame, text="collect ms").pack(side=LEFT, padx=(0, 2))
+        Entry(cmd_frame, textvariable=self.cfg_burst_collect_ms_var, width=5).pack(side=LEFT, padx=(0, 4))
+        Label(cmd_frame, text="rounds").pack(side=LEFT, padx=(0, 2))
+        Entry(cmd_frame, textvariable=self.cfg_burst_rounds_var, width=3).pack(side=LEFT, padx=(0, 8))
 
         # Кнопка установки системного времени ППКУ из времени ПК
         Button(cmd_frame, text="Set PPKY Time (PC)", command=self._send_set_system_time).pack(side=LEFT, padx=(8, 0))
@@ -1143,7 +1156,28 @@ class BusMonitorGUI:
             h = int(self.h_adr_var.get() or "0")
         except ValueError:
             h = 0
-        self.msg_queue.put({"log": "[*] Чтение конфигурации..."})
+        try:
+            burst_size = int(self.cfg_burst_size_var.get() or "128")
+            burst_collect_ms = int(self.cfg_burst_collect_ms_var.get() or "300")
+            burst_rounds = int(self.cfg_burst_rounds_var.get() or "3")
+        except ValueError:
+            self.msg_queue.put({"log": "[!] Параметры burst: целые числа (burst, collect ms, rounds)"})
+            return
+
+        if burst_size < 1 or burst_size > 512:
+            self.msg_queue.put({"log": "[!] burst должен быть 1..512"})
+            return
+        if burst_collect_ms < 10 or burst_collect_ms > 5000:
+            self.msg_queue.put({"log": "[!] collect ms должен быть 10..5000"})
+            return
+        if burst_rounds < 1 or burst_rounds > 20:
+            self.msg_queue.put({"log": "[!] rounds должен быть 1..20"})
+            return
+
+        self.msg_queue.put({
+            "log": f"[*] Чтение конфигурации... (burst={burst_size}, collect={burst_collect_ms}ms, rounds={burst_rounds})"
+        })
+        self._config_read_started_at = time.time()
         self.connect_btn.config(state=DISABLED)
         self.config_text.config(state=NORMAL)
         self.config_text.delete(1.0, END)
@@ -1168,33 +1202,60 @@ class BusMonitorGUI:
             self.msg_queue.put({"config_progress": (pct, current, total)})
 
         def do_read():
-            self.reader_stop.set()
-            if self.reader_thread:
-                self.reader_thread.join(timeout=1.0)
-            # Для чтения конфига используем отдельный парсер, чтобы исключить
-            # влияние промежуточного состояния основного потока чтения.
-            cfg_parser = BSUParser(be_id=False)
-            cfg_bytes, size = read_config_bytes(self.ser, cfg_parser, h, progress_callback=progress_cb)
-            self.reader_stop.clear()
-            self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
-            self.reader_thread.start()
-            self.msg_queue.put({"config_result": (cfg_bytes, size)})
+            cfg_bytes: bytes | None = None
+            size = 0
+            try:
+                self.reader_stop.set()
+                if self.reader_thread:
+                    self.reader_thread.join(timeout=1.0)
+                # Для чтения конфига используем отдельный парсер, чтобы исключить
+                # влияние промежуточного состояния основного потока чтения.
+                cfg_parser = BSUParser(be_id=False)
+                cfg_bytes, size = read_config_bytes(
+                    self.ser,
+                    cfg_parser,
+                    h,
+                    progress_callback=progress_cb,
+                    word_burst_size=burst_size,
+                    word_burst_collect_sec=(burst_collect_ms / 1000.0),
+                    word_burst_rounds=burst_rounds,
+                )
+            except Exception as e:
+                self.msg_queue.put({"log": f"[!] ReadConfig failed: {e}"})
+            finally:
+                self.reader_stop.clear()
+                if self.ser and self.ser.is_open:
+                    self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+                    self.reader_thread.start()
+                self.msg_queue.put({"config_result": (cfg_bytes, size)})
 
         threading.Thread(target=do_read, daemon=True).start()
 
     def _apply_config_result(self, cfg_bytes: bytes | None, size: int):
+        elapsed = None
+        if self._config_read_started_at is not None:
+            elapsed = max(0.0, time.time() - self._config_read_started_at)
+        self._config_read_started_at = None
         self.connect_btn.config(state=NORMAL)
         if cfg_bytes is None or size == 0:
             self.msg_queue.put({"log": "[!] Ошибка чтения конфигурации"})
             self.config_text.config(state=NORMAL)
             self.config_text.delete(1.0, END)
-            self.config_text.insert(END, "(ошибка)")
+            if elapsed is not None:
+                self.config_text.insert(END, f"Время чтения: {elapsed:.2f} с\n(ошибка)")
+            else:
+                self.config_text.insert(END, "(ошибка)")
             self.config_text.config(state=DISABLED)
             return
-        self.msg_queue.put({"log": f"[*] Конфигурация прочитана: {size} байт"})
+        if elapsed is not None:
+            self.msg_queue.put({"log": f"[*] Конфигурация прочитана: {size} байт за {elapsed:.2f} с"})
+        else:
+            self.msg_queue.put({"log": f"[*] Конфигурация прочитана: {size} байт"})
         lines = parse_config_display(cfg_bytes, debug_dump=self.config_debug_var.get())
         self.config_text.config(state=NORMAL)
         self.config_text.delete(1.0, END)
+        if elapsed is not None:
+            self.config_text.insert(END, f"Время чтения: {elapsed:.2f} с\n")
         if lines:
             self.config_text.insert(END, "\n".join(lines))
         else:
