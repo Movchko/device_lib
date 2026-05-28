@@ -239,17 +239,17 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
         # Формат backend-пакета для статуса ДПТ:
         # CAN data[0]   = Code (DeviceDPTStatus)
         # CAN data[1]   = состояние линии (LineState)
-        # CAN data[2..3]= measured_resistance_ohm (LE, 16 бит), Ом
-        # CAN data[4]   = max_temp_tc_c (°C, int8)
-        # CAN data[5]   = max_fault_mask (битовая маска: FAULT/SCV/SCG/OC)
-        # CAN data[6]   = max_temp_internal_c (°C, int8)
-        if len(data) >= 6:
+        # CAN data[2]   = max_fault_mask (битовая маска: FAULT/SCV/SCG/OC)
+        # CAN data[3..4]= max_temp_tc_c (°C, int16 LE)
+        # CAN data[5..6]= max_temp_internal_c (°C, int16 LE)
+        # CAN data[7]   = resistance_x100 (R = data[7] * 100 Ом)
+        if len(data) >= 8:
             line_code = data[1]
             line = DPT_LINE.get(line_code, "?")
-            resistance = data[2] | (data[3] << 8)
-            max_temp_tc = data[4] - 256 if data[4] >= 128 else data[4]
-            max_fault_mask = data[5]
-            max_temp_int = (data[6] - 256 if len(data) >= 7 and data[6] >= 128 else (data[6] if len(data) >= 7 else 0))
+            max_fault_mask = data[2]
+            max_temp_tc = struct.unpack_from("<h", data, 3)[0]
+            max_temp_int = struct.unpack_from("<h", data, 5)[0]
+            resistance = int(data[7]) * 100
             active_flags = [name for bit, name in MAX_FAULT_FLAGS if (max_fault_mask & bit)]
             flags_str = "|".join(active_flags) if active_flags else "OK"
             return _dev_line(
@@ -257,25 +257,33 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
             )
         return _dev_line(f"  {dev_str} | DPT status (len={len(data)})")
     if parsed["d_type"] == 15 and parsed["dir"]:  # Кнопка (на базе ДПТ) →
-        # Формат как у DPT: data[1]=LineState, data[2..3]=R, data[4]=tc, data[5]=fault_mask, data[6]=int
-        if len(data) >= 6:
+        # Формат как у DPT: data[1]=LineState, data[2]=fault_mask, data[3..4]=tc(int16), data[5..6]=int(int16), data[7]=R/100
+        if len(data) >= 8:
             line_code = data[1]
             line = BUTTON_LINE.get(line_code, f"code{line_code}")
-            resistance = data[2] | (data[3] << 8)
-            max_fault_mask = data[5]
+            max_fault_mask = data[2]
+            max_temp_tc = struct.unpack_from("<h", data, 3)[0]
+            max_temp_int = struct.unpack_from("<h", data, 5)[0]
+            resistance = int(data[7]) * 100
             active_flags = [name for bit, name in MAX_FAULT_FLAGS if (max_fault_mask & bit)]
             flags_str = "|".join(active_flags) if active_flags else "OK"
-            return _dev_line(f"  {dev_str} | line={line} R={resistance}Ω MAXmask=0x{max_fault_mask:02X}:{flags_str}")
+            return _dev_line(
+                f"  {dev_str} | line={line} R={resistance}Ω MAX(tc={max_temp_tc}°C,int={max_temp_int}°C,mask=0x{max_fault_mask:02X}:{flags_str})"
+            )
         return _dev_line(f"  {dev_str} | Button status (len={len(data)})")
     if parsed["d_type"] == 16 and parsed["dir"]:  # Концевик (на базе ДПТ) →
-        if len(data) >= 6:
+        if len(data) >= 8:
             line_code = data[1]
             line = LSWITCH_LINE.get(line_code, f"code{line_code}")
-            resistance = data[2] | (data[3] << 8)
-            max_fault_mask = data[5]
+            max_fault_mask = data[2]
+            max_temp_tc = struct.unpack_from("<h", data, 3)[0]
+            max_temp_int = struct.unpack_from("<h", data, 5)[0]
+            resistance = int(data[7]) * 100
             active_flags = [name for bit, name in MAX_FAULT_FLAGS if (max_fault_mask & bit)]
             flags_str = "|".join(active_flags) if active_flags else "OK"
-            return _dev_line(f"  {dev_str} | line={line} R={resistance}Ω MAXmask=0x{max_fault_mask:02X}:{flags_str}")
+            return _dev_line(
+                f"  {dev_str} | line={line} R={resistance}Ω MAX(tc={max_temp_tc}°C,int={max_temp_int}°C,mask=0x{max_fault_mask:02X}:{flags_str})"
+            )
         return _dev_line(f"  {dev_str} | LSwitch status (len={len(data)})")
     if parsed["d_type"] == 17 and parsed["dir"]:  # Реле →
         # data[1]=actual_state, data[2]=error_flag, data[3]=desired_state
@@ -286,19 +294,33 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
             return _dev_line(f"  {dev_str} | pos={actual} expected={desired} {err}")
         return _dev_line(f"  {dev_str} | Relay status (len={len(data)})")
     if parsed["d_type"] in (13, 14, 20, 21, 22, 23) and parsed["dir"]:
-        # МКУ → [data1]=seconds, [data2..4]=reserved, [data5]=CAN flags, [data6]=U24 (1V), [data7]=CAN state
-        if len(data) >= 6:
-            sec = int(data[1])
-            can_flags = int(data[5])  # явно int на случай list/array
+        # МКУ heartbeat (cmd=0) в разных версиях прошивки:
+        #   новый:  [1]=sec, [2..4]=0, [5]=CAN active, [6]=U24(1V), [7]=CAN state
+        #   legacy: [1..4]=tick32,        [5]=CAN active, [6]=0,      [7]=0
+        if len(data) >= 6 and data[0] == 0:
+            can_flags = int(data[5])
             can1 = "✓" if (can_flags & 0x01) else "—"
             can2 = "✓" if (can_flags & 0x02) else "—"
-            if parsed["d_type"] in (20, 21, 22, 23) and len(data) >= 7:
-                u24_code_1v = int(data[6])
-                u24_v = float(u24_code_1v)
-                return _dev_line(
-                    f"  {dev_str} | t={sec}s CAN1={can1} CAN2={can2} U24={u24_v:.0f}V"
-                )
-            return _dev_line(f"  {dev_str} | t={sec}s CAN1={can1} CAN2={can2}")
+
+            is_new_layout = (len(data) >= 8 and data[2] == 0 and data[3] == 0 and data[4] == 0)
+            if is_new_layout:
+                sec = int(data[1])
+                parts = [f"t={sec}s", f"CAN1={can1}", f"CAN2={can2}"]
+                if len(data) >= 7:
+                    parts.append(f"U24={int(data[6]):.0f}V")
+            else:
+                tick_ms = int(data[1]) | (int(data[2]) << 8) | (int(data[3]) << 16) | (int(data[4]) << 24)
+                parts = [f"tick={tick_ms}ms", f"CAN1={can1}", f"CAN2={can2}"]
+
+            if len(data) >= 8:
+                can_state_mask = int(data[7])
+                s0 = can_state_mask & 0x03
+                s1 = (can_state_mask >> 2) & 0x03
+                st_map = {0: "A", 1: "S", 2: "B"}
+                parts.append(f"C0={st_map.get(s0, '?')}")
+                parts.append(f"C1={st_map.get(s1, '?')}")
+
+            return _dev_line(f"  {dev_str} | " + " ".join(parts))
         return _dev_line(f"  {dev_str} | heartbeat")
 
     # Обычный пакет
@@ -584,6 +606,7 @@ def read_config_bytes(
     word_burst_size: int = 128,
     word_burst_collect_sec: float = 0.30,
     word_burst_rounds: int = 3,
+    transport_hint: str = "auto",
 ) -> tuple[bytes | None, int]:
     """
     Читает конфигурацию с ППКУ, возвращает (config_bytes, size) или (None, 0) при ошибке.
@@ -605,10 +628,17 @@ def read_config_bytes(
         pkt = build_bsu_can_packet(req_id, data)
         ser.write(pkt)
 
-    # Для WiFi/TCP задержки заметно выше, чем для USB-UART.
-    # Слишком частый перезапрос может перегружать конвертер и "душить" ответы.
-    RETRY_TIMEOUT_MS = 0.02
-    TOTAL_TIMEOUT_SEC = 5.0
+    # Профили транспорта:
+    # - WiFi/TCP: больше задержки и "окна" ожидания;
+    # - USB: более быстрый цикл запрос/ответ.
+    th = (transport_hint or "auto").strip().lower()
+    is_wifi_profile = (th == "wifi")
+    if is_wifi_profile:
+        RETRY_TIMEOUT_MS = 0.02
+        TOTAL_TIMEOUT_SEC = 5.0
+    else:
+        RETRY_TIMEOUT_MS = 0.006
+        TOTAL_TIMEOUT_SEC = 2.0
     WORD_BURST_SIZE = max(1, int(word_burst_size))
     WORD_BURST_COLLECT_SEC = max(0.01, float(word_burst_collect_sec))
     WORD_BURST_ROUNDS = max(1, int(word_burst_rounds))
@@ -659,7 +689,20 @@ def read_config_bytes(
 
     # --- 0. Узнаём полный размер конфига ---
     req = bytes([SVC_GET_CONFIG_SIZE]) + b"\x00" * 7
-    rsp = wait_response(req, SVC_GET_CONFIG_SIZE, broadcast_req=True, accept_any_ppky_addr=True)
+    if is_wifi_profile:
+        # Для WiFi обычно безопаснее стартовать с broadcast.
+        rsp = wait_response(req, SVC_GET_CONFIG_SIZE, broadcast_req=True, accept_any_ppky_addr=True)
+    else:
+        # Для USB сначала пробуем адресный запрос (если h_adr уже задан),
+        # затем fallback на broadcast для автопоиска ППКУ.
+        rsp = wait_response(
+            req,
+            SVC_GET_CONFIG_SIZE,
+            broadcast_req=(current_h_adr == 0),
+            accept_any_ppky_addr=(current_h_adr == 0),
+        )
+        if (not rsp or len(rsp) < 5):
+            rsp = wait_response(req, SVC_GET_CONFIG_SIZE, broadcast_req=True, accept_any_ppky_addr=True)
     if not rsp or len(rsp) < 5:
         return (None, 0)
     size_bytes = ((rsp[1] << 24) |

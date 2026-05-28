@@ -163,6 +163,7 @@ uint32_t GetConfigWord(uint16_t num); // get 4 bytes
 void SetConfigWord(uint16_t num, uint32_t word); // set 4 bytes
 void SaveConfig();
 void ResetConfig();
+void AplyConfig();
 
 // работа с удаленным обновлением прошивки
 uint8_t SetUpdateWord(uint32_t num, uint32_t word);                 // записать 4-байтное слово обновления

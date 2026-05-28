@@ -43,6 +43,8 @@ from bus_monitor import (
     IGNITER_LINE,
 )
 
+SERVICE_CMD_POSITION_DEVICE = 161
+
 WIFI_DEFAULT_HOST = "192.168.4.1"
 WIFI_DEFAULT_PORT = "23"
 
@@ -123,6 +125,9 @@ class BusMonitorGUI:
         self._igniter_status_interval_s = 0.05
         self._rx_silence_reset_s = 2.0
         self._rx_stall_warn_s = 3.0
+        self._pps_window_started_at = time.time()
+        self._pps_packets_in_window = 0
+        self._pps_value = 0
         self.bsu = BSUParser(be_id=False)
 
         self.can_id_req: int | None = None
@@ -144,6 +149,9 @@ class BusMonitorGUI:
         self.igniter_sc_check_enabled = True
         self.relay_h_var = StringVar(value="1")
         self.relay_l_var = StringVar(value="1")
+        self.lswitch_h_var = StringVar(value="1")
+        self.lswitch_l_var = StringVar(value="1")
+        self.lswitch_normal_closed = False  # False=NO, True=NC
         self.mcu_zone_type_options = (
             "13 - МКУ_IGN",
             "14 - МКУ_TC",
@@ -165,6 +173,9 @@ class BusMonitorGUI:
         self._last_crc_request: str | None = None
         self._config_read_started_at: float | None = None
         self.device_statuses: dict[tuple[int, int, int, int, int], tuple[str, float]] = {}  # key -> (line, last_seen_time)
+        # Последние принятые "веса" (ServiceCmd_PositionDevice) по МКУ:
+        # key=(d_type,h_adr,l_adr,zone) -> ([w1,w2,...], last_seen_time)
+        self.mcu_position_weights: dict[tuple[int, int, int, int], tuple[list[int], float]] = {}
         # Это только UI-таймаут видимости устройств, НЕ таймаут соединения.
         # 15 с давали ложное ощущение "обрыва связи" на нестабильном WiFi.
         self.status_idle_timeout = 60.0  # сек — убирать записи без посылок дольше 60 с
@@ -212,6 +223,8 @@ class BusMonitorGUI:
         Button(conn_frame, text="Задать адреса", command=self._send_ppky_auto_address).pack(side=LEFT, padx=(4, 0))
         # Сохранить состояние системы (команда 11)
         Button(conn_frame, text="Сохранить МКУ", command=self._send_ppky_save_system_state).pack(side=LEFT, padx=(8, 0))
+        # Применить конфиг-образ ППКУ ко всем МКУ (команда 15)
+        Button(conn_frame, text="Применить конфиг", command=self._send_ppky_apply_config_image).pack(side=LEFT, padx=(4, 0))
         # Софт/хард ресет устройств на шине (команда 12, параметр 0/1)
         Button(conn_frame, text="Soft reset", command=self._send_ppky_soft_reset).pack(side=LEFT, padx=(8, 0))
         Button(conn_frame, text="Hard reset", command=self._send_ppky_hard_reset).pack(side=LEFT, padx=(4, 0))
@@ -289,6 +302,21 @@ class BusMonitorGUI:
         Button(relay_frame, text="Вкл", command=self._send_relay_on).pack(side=LEFT, padx=(8, 0))
         Button(relay_frame, text="Выкл", command=self._send_relay_off).pack(side=LEFT, padx=(4, 0))
 
+        # --- Панель концевика ---
+        lswitch_frame = Frame(main)
+        lswitch_frame.pack(fill=X, pady=(0, 8))
+        Label(lswitch_frame, text="Концевик:").pack(side=LEFT, padx=(0, 4))
+        Label(lswitch_frame, text="h_adr").pack(side=LEFT, padx=(8, 2))
+        Entry(lswitch_frame, textvariable=self.lswitch_h_var, width=3).pack(side=LEFT, padx=(0, 8))
+        Label(lswitch_frame, text="l_adr").pack(side=LEFT, padx=(0, 2))
+        Entry(lswitch_frame, textvariable=self.lswitch_l_var, width=3).pack(side=LEFT, padx=(0, 8))
+        self.lswitch_mode_btn = Button(
+            lswitch_frame,
+            text="Тип: NO (нормально открытый)",
+            command=self._toggle_lswitch_normal_closed
+        )
+        self.lswitch_mode_btn.pack(side=LEFT, padx=(8, 0))
+
         # --- Панель назначения зоны МКУ (cmd=20) ---
         mcu_zone_frame = Frame(main)
         mcu_zone_frame.pack(fill=X, pady=(0, 8))
@@ -348,8 +376,12 @@ class BusMonitorGUI:
         self.status_text.pack(side=LEFT, fill=BOTH, expand=True)
         status_scroll.pack(side=RIGHT, fill=Y)
         self.status_text.config(yscrollcommand=status_scroll.set)
-        self.log_label = Label(main, text="", fg="gray", font=("Consolas", 8))
-        self.log_label.pack(fill=X, pady=(4, 0))
+        status_bar = Frame(main)
+        status_bar.pack(fill=X, pady=(4, 0))
+        self.pps_label = Label(status_bar, text="PPS: 0", fg="gray", font=("Consolas", 8), anchor="w")
+        self.pps_label.pack(side=LEFT)
+        self.log_label = Label(status_bar, text="", fg="gray", font=("Consolas", 8), anchor="w")
+        self.log_label.pack(side=LEFT, fill=X, expand=True, padx=(12, 0))
 
     def _log(self, msg: str, prefix: str = ""):
         """Лог в статусную панель (только для важных событий)."""
@@ -389,6 +421,31 @@ class BusMonitorGUI:
         if p["dir"] != 1:
             return
         cmd = data[0] if len(data) > 0 else -1
+        # Пакет веса МКУ храним отдельно и НЕ даём ему затирать основную строку статуса.
+        if (
+            cmd == SERVICE_CMD_POSITION_DEVICE
+            and p["d_type"] in (13, 14, 20, 21, 22, 23)
+            and len(data) >= 2
+        ):
+            key_w = (p["d_type"], p["h_adr"], p["l_adr"], p["zone"])
+            now_ts = time.time()
+            prev = self.mcu_position_weights.get(key_w)
+            weights = list(prev[0]) if prev else []
+            w = int(data[1]) & 0xFF
+            if w not in weights:
+                weights.append(w)
+            else:
+                # Если вес уже был, переносим его в конец как "самый свежий".
+                weights = [x for x in weights if x != w] + [w]
+            # Держим компактный хвост последних наблюдений.
+            if len(weights) > 4:
+                weights = weights[-4:]
+            self.mcu_position_weights[key_w] = (weights, now_ts)
+            if not self._refresh_pending:
+                self._refresh_pending = True
+                self.msg_queue.put({"refresh_status": True})
+            return
+
         # Для ППКУ храним раздельно минимум два типа сообщений:
         # статус (cmd=0) и время (cmd=157), чтобы они не затирали друг друга.
         # Для остальных устройств ключ без разделения по cmd.
@@ -411,6 +468,11 @@ class BusMonitorGUI:
             for k in stale:
                 del self.device_statuses[k]
             self.msg_queue.put({"refresh_status": True})
+        stale_weights = [k for k, (_, t) in self.mcu_position_weights.items() if now - t > self.status_idle_timeout]
+        if stale_weights:
+            for k in stale_weights:
+                del self.mcu_position_weights[k]
+            self.msg_queue.put({"refresh_status": True})
         self.root.after(1000, self._periodic_status_purge)
 
     def _refresh_status_display(self):
@@ -420,6 +482,9 @@ class BusMonitorGUI:
         stale = [k for k, (_, t) in self.device_statuses.items() if now - t > self.status_idle_timeout]
         for k in stale:
             del self.device_statuses[k]
+        stale_weights = [k for k, (_, t) in self.mcu_position_weights.items() if now - t > self.status_idle_timeout]
+        for k in stale_weights:
+            del self.mcu_position_weights[k]
 
         self.status_text.config(state=NORMAL)
         self.status_text.delete(1.0, END)
@@ -429,6 +494,13 @@ class BusMonitorGUI:
             for key in sorted(self.device_statuses.keys()):
                 line, last_seen = self.device_statuses[key]
                 ts = datetime.fromtimestamp(last_seen).strftime("%H:%M:%S.%f")[:-3]
+                dt, ha, la, zn, _cmd_key = key
+                if dt in (13, 14, 20, 21, 22, 23):
+                    w_key = (dt, ha, la, zn)
+                    w_info = self.mcu_position_weights.get(w_key)
+                    if w_info and w_info[0]:
+                        w_str = ",".join(str(v) for v in w_info[0])
+                        line = f"{line} | вес={w_str}"
                 self.status_text.insert(END, f"[{ts}] {line}\n")
         self.status_text.config(state=DISABLED)
 
@@ -511,6 +583,15 @@ class BusMonitorGUI:
             self._last_status_refresh_ts = time.perf_counter()
             self._refresh_pending = False
             self._refresh_status_display()
+
+        # Обновление счётчика пакетов/с (скользящее окно 1с по входящим кадрам).
+        now = time.time()
+        if (now - self._pps_window_started_at) >= 1.0:
+            self._pps_value = self._pps_packets_in_window
+            self._pps_packets_in_window = 0
+            self._pps_window_started_at = now
+            if hasattr(self, "pps_label"):
+                self.pps_label.config(text=f"PPS: {self._pps_value}")
         self.root.after(50, self._process_queue)
 
     def _update_can_ids(self):
@@ -552,7 +633,15 @@ class BusMonitorGUI:
                     self.msg_queue.put({"log": "[!] Укажите COM-порт"})
                     return
                 # timeout/write_timeout нужны, чтобы при проблемах драйвера или бурсте трафика UI не "зависал" навсегда.
-                self.ser = serial.Serial(port, 1000000, timeout=0.01, write_timeout=0.5)
+                self.ser = serial.Serial(
+                    port,
+                    1000000,
+                    timeout=0.01,
+                    write_timeout=None,
+                    xonxoff=False,
+                    rtscts=False,
+                    dsrdtr=False,
+                )
                 self.msg_queue.put({"log": f"[*] Подключено к {port}"})
 
             self._update_can_ids()
@@ -595,7 +684,19 @@ class BusMonitorGUI:
             return False
         try:
             with self._serial_lock:
-                self.ser.write(pkt)
+                written = self.ser.write(pkt)
+                if written is None:
+                    written = len(pkt)
+                if written < len(pkt):
+                    # Нередкий USB кейс: частичная запись при нагрузке драйвера.
+                    # Досылаем хвост пакета сразу, не трогая output buffer.
+                    rest = pkt[written:]
+                    written2 = self.ser.write(rest)
+                    if written2 is None:
+                        written2 = len(rest)
+                    written += written2
+                if written < len(pkt):
+                    raise OSError(f"partial write: {written}/{len(pkt)} bytes")
             return True
         except Exception as e:
             suffix = f" ({context})" if context else ""
@@ -727,6 +828,7 @@ class BusMonitorGUI:
                 for b in chunk:
                     result = self.bsu.feed(b)
                     if result:
+                        self._pps_packets_in_window += 1
                         if len(result) >= 2:
                             can_id, data = result[0], result[1]
                         else:
@@ -766,6 +868,19 @@ class BusMonitorGUI:
         if not self._write_packet(pkt, label):
             return
         self.msg_queue.put({"log": f">> {label}  data=[{data.hex()}]"})
+
+    def _send_ppky_cmd_broadcast(self, data: bytes, label: str):
+        """Отправить команду ППКУ в broadcast-адрес (type=PPKY, h/l=0).
+        Это устойчиво к несовпадению текущей зоны/адреса в GUI и фактического runtime-состояния.
+        """
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        can_id_broadcast = build_can_id(DEVICE_PPKY_TYPE, 0, 0, 0, 0)
+        pkt = build_bsu_can_packet(can_id_broadcast, data)
+        if not self._write_packet(pkt, label):
+            return
+        self.msg_queue.put({"log": f">> {label}  data=[{data.hex()}] (broadcast h=0,l=0)"})
 
     def _send_ppky_query_with_broadcast_fallback(self, data: bytes, label: str):
         """Отправить запрос ППКУ по выбранному h_adr и дополнительно broadсast (h=0).
@@ -847,7 +962,7 @@ class BusMonitorGUI:
         except ValueError:
             i = 0
         req = bytes([SVC_GET_CONFIG_WORD, (i >> 8) & 0xFF, i & 0xFF]) + b"\x00" * 5
-        self._send(req, f"GetConfigWord word#{i}")
+        self._send_ppky_query_with_broadcast_fallback(req, f"GetConfigWord word#{i}")
 
     def _send_igniter_start(self):
         """Отправить команду «Запуск» (cmd=10) спичке по адресу h_adr, l_adr."""
@@ -932,6 +1047,46 @@ class BusMonitorGUI:
 
     def _send_relay_off(self):
         self._send_relay_set(0)
+
+    def _toggle_lswitch_normal_closed(self):
+        """Переключить параметр normal_closed у концевика (cmd=17, 0=NO, 1=NC)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        try:
+            h = int(self.lswitch_h_var.get() or "1")
+            l = int(self.lswitch_l_var.get() or "1")
+        except ValueError:
+            self.msg_queue.put({"log": "[!] Неверный адрес концевика (h_adr, l_adr)"})
+            return
+
+        target_nc = not self.lswitch_normal_closed
+        val = 1 if target_nc else 0  # device_lswitch.cpp: 0=NO, 1=NC
+
+        zone = self._find_active_device_zone_exact(16, h, l)
+        used_fallback = False
+        if zone is None:
+            zone = 0
+            used_fallback = True
+
+        can_id = build_can_id(16, h, l, zone, 0)  # d_type=16 (LSWITCH), dir=0 (запрос)
+        data = bytes([17, val]) + b"\x00" * 6
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "LSwitchSetNormalClosed"):
+            return
+
+        self.lswitch_normal_closed = target_nc
+        mode_text = "NC (нормально закрытый)" if self.lswitch_normal_closed else "NO (нормально открытый)"
+        self.lswitch_mode_btn.config(text=f"Тип: {mode_text}")
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Концевик (h={h}, l={l}) тип={mode_text}, zone=0 (fallback: нет свежего статуса) "
+                       f"(cmd=17, val={val})"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> Концевик (h={h}, l={l}, zone={zone}) тип={mode_text} (cmd=17, val={val})"
+            })
 
     def _find_active_device_addr(self, d_type: int, h_adr: int) -> tuple[int, int] | None:
         """Найти актуальные l_adr и zone по последним активным статусам устройства."""
@@ -1043,38 +1198,40 @@ class BusMonitorGUI:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
 
-        # Обновляем can_id_req для PPKY (DEVICE_PPKY_TYPE, текущий h_adr, dir=0)
-        self._update_can_ids()
-
         data = bytes([10]) + b"\x00" * 7  # команда 10, без параметров
-        self._send(data, "PPKY AutoAddress (cmd=10)")
+        self._send_ppky_cmd_broadcast(data, "PPKY AutoAddress (cmd=10)")
 
     def _send_ppky_save_system_state(self):
         """Сохранить состояние системы в ППКУ (команда 11): записать найденные МКУ в конфиг ППКУ."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
-        self._update_can_ids()
         data = bytes([11]) + b"\x00" * 7
-        self._send(data, "PPKY SaveSystemState (cmd=11)")
+        self._send_ppky_cmd_broadcast(data, "PPKY SaveSystemState (cmd=11)")
+
+    def _send_ppky_apply_config_image(self):
+        """Применить конфиг-образ из ППКУ ко всем МКУ (команда 15)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        data = bytes([15]) + b"\x00" * 7
+        self._send_ppky_cmd_broadcast(data, "PPKY ApplyConfigImage (cmd=15)")
 
     def _send_ppky_soft_reset(self):
         """Софт‑ресет устройств на шине через ППКУ (команда 12, параметр 0)."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
-        self._update_can_ids()
         data = bytes([12, 0]) + b"\x00" * 6
-        self._send(data, "PPKY SoftReset (cmd=12, mode=0)")
+        self._send_ppky_cmd_broadcast(data, "PPKY SoftReset (cmd=12, mode=0)")
 
     def _send_ppky_hard_reset(self):
         """Хард‑ресет устройств на шине через ППКУ (команда 12, параметр 1)."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
-        self._update_can_ids()
         data = bytes([12, 1]) + b"\x00" * 6
-        self._send(data, "PPKY HardReset (cmd=12, mode=1)")
+        self._send_ppky_cmd_broadcast(data, "PPKY HardReset (cmd=12, mode=1)")
 
     def _send_mcu_tc_fire(self):
         """Имитация «ПОЖАР» от МКУ_ТС: h_adr в CAN всегда 1; зона — индекс зоны как в конфиге ППКУ (0…).
@@ -1142,11 +1299,7 @@ class BusMonitorGUI:
 
         can_id = build_can_id(DEVICE_PPKY_TYPE, h, 0, 0, 0)  # dir=0 запрос
         data = bytes([157, bcd_h, bcd_m, bcd_s, bcd_y, bcd_mon, bcd_day])
-        pkt = build_bsu_can_packet(can_id, data)
-        if not self._write_packet(pkt, "SetSystemTime"):
-            return
-        self.msg_queue.put({"log": f">> SetSystemTime: {hh:02d}:{mm:02d}:{ss:02d} "
-                                   f"{day:02d}.{mon:02d}.{now.year:04d} (BCD)"})
+        self._send_ppky_cmd_broadcast(data, f"SetSystemTime {hh:02d}:{mm:02d}:{ss:02d} {day:02d}.{mon:02d}.{now.year:04d}")
 
     def _read_full_config(self):
         if not self.ser or not self.ser.is_open:
@@ -1208,6 +1361,13 @@ class BusMonitorGUI:
                 self.reader_stop.set()
                 if self.reader_thread:
                     self.reader_thread.join(timeout=1.0)
+                # Для USB полезно очистить хвост входного буфера перед серией
+                # запросов конфига, чтобы не мешали старые status-пакеты.
+                if self.ser and self.ser.is_open and not self._is_wifi_transport():
+                    try:
+                        self.ser.reset_input_buffer()
+                    except Exception:
+                        pass
                 # Для чтения конфига используем отдельный парсер, чтобы исключить
                 # влияние промежуточного состояния основного потока чтения.
                 cfg_parser = BSUParser(be_id=False)
@@ -1219,6 +1379,7 @@ class BusMonitorGUI:
                     word_burst_size=burst_size,
                     word_burst_collect_sec=(burst_collect_ms / 1000.0),
                     word_burst_rounds=burst_rounds,
+                    transport_hint=("wifi" if self._is_wifi_transport() else "usb"),
                 )
             except Exception as e:
                 self.msg_queue.put({"log": f"[!] ReadConfig failed: {e}"})

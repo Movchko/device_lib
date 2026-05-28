@@ -168,20 +168,25 @@ void VDeviceDPT::SetStatus() {
 
 	Data[0] = LineState;
 
-	/* Data[1..2] - измеренное сопротивление (младший байт, старший байт), Ом */
-	Data[1] = measured_resistance_ohm & 0xFF;
-	Data[2] = (measured_resistance_ohm >> 8) & 0xFF;
+	/* Новый формат для DPT/LSWITCH/BUTTON:
+	 * Data[1]   - fault bitmask MAX
+	 * Data[2:3] - температура термопары MAX (int16 LE, °C)
+	 * Data[4:5] - внутренняя температура MAX (int16 LE, °C)
+	 * Data[6]   - измеренное сопротивление в сотнях Ом (uint8, R=Data[6]*100 Ом)
+	 */
+	Data[1] = max_fault & 0xFF;
 
-
-	/* Data[3] - температура термопары MAX (int8)
-	 * Data[4] - fault bitmask MAX
-	 * Data[5] - внутренняя температура MAX (int8) */
-	if(max_temp_c > 0xff)
-		Data[3] = 0xff;
-	else
-		Data[3] = max_temp_c & 0xFF;
-	Data[4] = max_fault & 0xFF;
-	Data[5] = max_internal_temp_c & 0xFF;
+	int16_t tc = max_temp_c;
+	int16_t ti = max_internal_temp_c;
+	Data[2] = (uint8_t)((uint16_t)tc & 0xFF);
+	Data[3] = (uint8_t)(((uint16_t)tc >> 8) & 0xFF);
+	Data[4] = (uint8_t)((uint16_t)ti & 0xFF);
+	Data[5] = (uint8_t)(((uint16_t)ti >> 8) & 0xFF);
+	uint32_t r100 = measured_resistance_ohm / 100u;
+	if (r100 > 255u) {
+		r100 = 255u;
+	}
+	Data[6] = (uint8_t)r100;
 
 	if (VDeviceSetStatus != nullptr) {
 		VDeviceSetStatus(Num, Status, Data);

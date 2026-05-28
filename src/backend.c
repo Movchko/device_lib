@@ -32,6 +32,11 @@ uint8_t USBSndBuf[CDCPKTLEN] = {CDCPRE1, CDCPRE2};
 
 uint8_t CanStopSend = 0;
 uint8_t CanStopRetranslate = 0;
+/* Защита от "залипания" сервисных стоп-флагов при потере команды восстановления.
+ * Флаги StopStartSend/StopStartReTranslate автоматически снимаются по таймауту. */
+#define BACKEND_STOP_GUARD_TIMEOUT_MS 15000u
+static uint16_t g_stop_send_guard_ms = 0u;
+static uint16_t g_stop_retranslate_guard_ms = 0u;
 
 uint8_t isSendStartMessage = 0;
 
@@ -55,6 +60,7 @@ __attribute__((weak)) void ListenerCommandCB(uint32_t MsgID, uint8_t *MsgData);
 __attribute__((weak)) void USBSendData(uint8_t *Buf);
 __attribute__((weak)) void UARTSendData(uint8_t *Buf);
 __attribute__((weak)) void ResetConfig();
+__attribute__((weak)) void AplyConfig();
 /* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
 __attribute__((weak)) void CanSendOverError(void) { (void)0; }
 
@@ -123,6 +129,21 @@ void SendStartMessage() {
 }
 
 void BackendProcess() {
+	/* Фоновая защита: если "стоп" был включён, но команда на восстановление потерялась,
+	 * автоматически возвращаем работу обмена через guard-таймаут. */
+	if (CanStopSend && g_stop_send_guard_ms > 0u) {
+		g_stop_send_guard_ms--;
+		if (g_stop_send_guard_ms == 0u) {
+			CanStopSend = 0u;
+		}
+	}
+	if (CanStopRetranslate && g_stop_retranslate_guard_ms > 0u) {
+		g_stop_retranslate_guard_ms--;
+		if (g_stop_retranslate_guard_ms == 0u) {
+			CanStopRetranslate = 0u;
+		}
+	}
+
 	//здесь задержка запуска устройства в шине
 	if(start_delay < (BoardDevicesList[0].h_adr * 30)) {
 		start_delay++;
@@ -194,11 +215,15 @@ void ProtocolParse(uint32_t MsgID, uint8_t *MsgData, uint8_t bus) {
 		uint8_t addr_match = (id.field.zone == (BoardDevicesList[i].zone & 0x7F)) &&
 		                     (id.field.h_adr == BoardDevicesList[i].h_adr) &&
 		                     ((id.field.l_adr & 0x3F) == (BoardDevicesList[i].l_adr & 0x3F));
+		/* Broadcast принимаем только:
+		 *  - общий (d_type=0), либо
+		 *  - типовой (d_type совпадает с текущим устройством). */
+		uint8_t broadcast_match = (isBroadcast && (id.field.d_type == 0u || type_match)) ? 1u : 0u;
 
 		if(type_match && addr_match && id.field.dir) // если вдруг кольцо на себя
 			return;
 
-		if ((type_match && addr_match) || (/*type_match &&*/ isBroadcast)) {
+		if ((type_match && addr_match) || broadcast_match) {
 
 
     		if(Command >= 128) {
@@ -379,6 +404,7 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t re
 		case ServiceCmd_SaveConfig: { // save config from local
 			SaveConfig();
 			SendMessage(Dev, Command, Data, SEND_NOW, reply_bus);
+			AplyConfig();
 		}break;
 		case ServiceCmd_StartSetConfig: { // restore defaults into local config
 			ResetConfig();
@@ -446,10 +472,16 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 			ResetMCU();
 		}break;
 		case ServiceCmd_StopStartSend: { // Stop/Start останавливает очередь на отправку в кан, остаются только принудительные (приоритетные отправки)
-			CanStopSend = MsgData[0];
+			if (MsgData[0] <= 1u) {
+				CanStopSend = MsgData[0];
+				g_stop_send_guard_ms = (CanStopSend != 0u) ? BACKEND_STOP_GUARD_TIMEOUT_MS : 0u;
+			}
 		}break;
 		case ServiceCmd_StopStartReTranslate: { // Stop/Start останавливает автоматическую ретрансляцию из одного CAN в другой
-			CanStopRetranslate = MsgData[0];
+			if (MsgData[0] <= 1u) {
+				CanStopRetranslate = MsgData[0];
+				g_stop_retranslate_guard_ms = (CanStopRetranslate != 0u) ? BACKEND_STOP_GUARD_TIMEOUT_MS : 0u;
+			}
 
 		}break;
 		case ServiceCmd_CircSetAdr: { // установка адреса по кольцу
