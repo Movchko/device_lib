@@ -361,7 +361,7 @@ void VDeviceDPT::UpdateLineStateInstant() {
 		 */
 		if (DPT_USE_MAX_FAULT_IN_LOGIC && max_fault) {
 			LineState = DeviceDPTLineState_Fault;
-		} else if(max_temp_c > (max_fire_threshold_c - (max_fire_threshold_c * DT_TEMPERATURE_WARNING_LIMIT) / 100)) {
+		} else if(max_temp_c > (max_fire_threshold_c - (max_fire_threshold_c * DT_TEMPERATURE_WARNING_LIMIT) / 100) && (max_temp_c < max_fire_threshold_c)) {
 			UpdateStatus(DeviceDPTStatus_Warning);
 		} else if (max_temp_c > static_cast<int16_t>(max_fire_threshold_c)) {
 			LineState = GetTriggeredLineState();
