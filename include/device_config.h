@@ -165,8 +165,15 @@ typedef struct DeviceRelayConfig {
 	/* Время ожидания установления обратной связи после переключения, мс */
 	uint16_t settle_time_ms;
 
+	/* Режим переключения для автоматики
+	 * 0 - выкл
+	 * 1 - пожар
+	 * 2 - неиспр
+	 * 3 - конц открытие*/
+	uint8_t mode;
+
 	/* резерв до полного размера VDeviceCfg::reserv (64 байта) */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 6];
+	uint8_t reserved[VDEVICE_CFG_SIZE - 7];
 } DeviceRelayConfig;
 
 typedef enum DeviceLimitSwitchFunction {
