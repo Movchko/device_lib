@@ -94,14 +94,20 @@ void VDeviceIgniter::UpdateLineFromAdcMv(uint16_t adc_mv) {
 	//if (adc_mv == 0) {
 	//	return;
 	//}
-	/* 1..break_low = норма, break_low..break_high = обрыв/КЗ, >=break_high = ошибка */
+	/* Классификация линии по порогам:
+	 *  [0 .. break_low)   -> КЗ
+	 *  [break_low .. break_high) -> Норма
+	 *  [break_high .. +inf) -> Обрыв
+	 *
+	 * disable_sc_check (cmd=11) применяется в SetLineState():
+	 * если КЗ запрещено учитывать, состояние Short преобразуется в Normal. */
 	uint8_t new_candidate;
-	if (adc_mv >= threshold_break_high) {
-		new_candidate = (uint8_t)DeviceIgniterLineState_Break;  /* ошибка → обрыв */
-	} else if (adc_mv < threshold_break_low) {
+	if (adc_mv < threshold_break_low) {
+		new_candidate = (uint8_t)DeviceIgniterLineState_Short;
+	} else if (adc_mv < threshold_break_high) {
 		new_candidate = (uint8_t)DeviceIgniterLineState_Normal;
 	} else {
-		new_candidate = (uint8_t)DeviceIgniterLineState_Break;   /* обрыв/КЗ */
+		new_candidate = (uint8_t)DeviceIgniterLineState_Break;
 	}
 
 	if (new_candidate != debounce_candidate) {
@@ -139,6 +145,21 @@ void VDeviceIgniter::Process() {
 void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 	switch(Command) {
 		case 10: {
+			/* Если на момент команды линия в КЗ, не запускаем исполнитель,
+			 * но считаем команду обработанной: выставляем start/end ack. */
+			if (LineState == DeviceIgniterLineState_Short) {
+				State = DeviceIgniterState_Idle;
+				Status = DeviceIgniterStatus_Idle;
+				run_elapsed_ms = 0;
+				pwm_value = 0;
+				burn_phase = BURN_PHASE_RAMP;
+				burn_cycle = 0;
+				start_ack = 1;
+				end_ack = 1;
+				UpdateStatus(Status);
+				break;
+			}
+
 			State = DeviceIgniterState_Run;
 			Status = DeviceIgniterStatus_Run;
 			run_elapsed_ms = 0;
@@ -148,7 +169,7 @@ void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 			start_ack = 1;
 			end_ack = 0;
 			UpdateStatus(Status);
-#if 0
+#if 0 // блок выставлял ошибку на линию при попытке запустить спичку, если линия неисправна.
 			if ((State == DeviceIgniterState_Idle) || (State == DeviceIgniterState_Error)) {
 				if (LineState == DeviceIgniterLineState_Break) {
 					State = DeviceIgniterState_Error;
