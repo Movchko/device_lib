@@ -142,6 +142,49 @@ void VDeviceRelay::CommandCB(uint8_t Command, uint8_t *Parameters)
 			pending_switch = 0u;
 			SavePersistentStateIfNeeded();
 		}
+	} else if (Command == 11u) {
+		/* cmd=11: установить режим реле (0..3). */
+		if (Config != nullptr && Parameters != nullptr) {
+			uint8_t mode = Parameters[0];
+			if (mode > 3u) {
+				mode = 3u;
+			}
+			Config->mode = mode;
+			if (VDeviceSaveCfg != nullptr) {
+				VDeviceSaveCfg();
+			}
+		}
+	} else if (Command == 12u) {
+		/* cmd=12: установить initial_state (0/1) и применить сразу. */
+		uint8_t init_state = 0u;
+		if (Parameters != nullptr && Parameters[0] != 0u) {
+			init_state = 1u;
+		}
+		if (Config != nullptr) {
+			Config->initial_state = init_state;
+		}
+		desired_state = init_state;
+		pending_state = init_state;
+		pending_switch = 0u;
+		switch_delay_counter_ms = 0u;
+		ApplyOutput(desired_state);
+		settle_counter_ms = 0u;
+		if (VDeviceSaveCfg != nullptr) {
+			VDeviceSaveCfg();
+		}
+	} else if (Command == 13u) {
+		/* cmd=13: включить/выключить persist_state_enabled (0/1). */
+		uint8_t persist = 0u;
+		if (Parameters != nullptr && Parameters[0] != 0u) {
+			persist = 1u;
+		}
+		persist_state_enabled = persist;
+		if (Config != nullptr) {
+			Config->persist_state_enabled = persist;
+		}
+		if (VDeviceSaveCfg != nullptr) {
+			VDeviceSaveCfg();
+		}
 	}
 
 }
