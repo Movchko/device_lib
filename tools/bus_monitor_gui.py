@@ -145,10 +145,22 @@ class BusMonitorGUI:
         self.mcu_tc_fire_zone_var = StringVar(value="0")
         self.igniter_h_var = StringVar(value="1")
         self.igniter_l_var = StringVar(value="1")
+        self.igniter_th_low_var = StringVar(value="1000")
+        self.igniter_th_high_var = StringVar(value="3000")
+        self.igniter_retry_var = StringVar(value="1")
         self.igniter_status_var = StringVar(value="—")
         self.igniter_sc_check_enabled = True
         self.relay_h_var = StringVar(value="1")
         self.relay_l_var = StringVar(value="1")
+        self.relay_mode_options = (
+            "0 - нет авто",
+            "1 - по пожару",
+            "2 - по неисправности",
+            "3 - по концевику",
+        )
+        self.relay_mode_var = StringVar(value=self.relay_mode_options[0])
+        self.relay_initial_state_var = StringVar(value="0")
+        self.relay_persist_state_var = StringVar(value="0")
         self.lswitch_h_var = StringVar(value="1")
         self.lswitch_l_var = StringVar(value="1")
         self.lswitch_normal_closed = False  # False=NO, True=NC
@@ -287,6 +299,13 @@ class BusMonitorGUI:
             command=self._toggle_igniter_sc_check
         )
         self.igniter_sc_btn.pack(side=LEFT, padx=(6, 0))
+        Label(igniter_frame, text="low").pack(side=LEFT, padx=(12, 2))
+        Entry(igniter_frame, textvariable=self.igniter_th_low_var, width=5).pack(side=LEFT, padx=(0, 4))
+        Label(igniter_frame, text="high").pack(side=LEFT, padx=(0, 2))
+        Entry(igniter_frame, textvariable=self.igniter_th_high_var, width=5).pack(side=LEFT, padx=(0, 4))
+        Label(igniter_frame, text="retry").pack(side=LEFT, padx=(0, 2))
+        Entry(igniter_frame, textvariable=self.igniter_retry_var, width=2).pack(side=LEFT, padx=(0, 6))
+        Button(igniter_frame, text="Пороги (cmd=12)", command=self._send_igniter_thresholds).pack(side=LEFT, padx=(2, 0))
         Label(igniter_frame, text="Статус:").pack(side=LEFT, padx=(16, 4))
         self.igniter_status_label = Label(igniter_frame, textvariable=self.igniter_status_var, fg="gray")
         self.igniter_status_label.pack(side=LEFT)
@@ -301,6 +320,36 @@ class BusMonitorGUI:
         Entry(relay_frame, textvariable=self.relay_l_var, width=3).pack(side=LEFT, padx=(0, 8))
         Button(relay_frame, text="Вкл", command=self._send_relay_on).pack(side=LEFT, padx=(8, 0))
         Button(relay_frame, text="Выкл", command=self._send_relay_off).pack(side=LEFT, padx=(4, 0))
+        Label(relay_frame, text="режим").pack(side=LEFT, padx=(10, 2))
+        self.relay_mode_combo = ttk.Combobox(
+            relay_frame,
+            textvariable=self.relay_mode_var,
+            values=self.relay_mode_options,
+            state="readonly",
+            width=18,
+        )
+        self.relay_mode_combo.pack(side=LEFT, padx=(0, 4))
+        Button(relay_frame, text="Set mode", command=self._send_relay_mode).pack(side=LEFT, padx=(2, 6))
+        Label(relay_frame, text="init").pack(side=LEFT, padx=(0, 2))
+        self.relay_initial_state_combo = ttk.Combobox(
+            relay_frame,
+            textvariable=self.relay_initial_state_var,
+            values=("0", "1"),
+            state="readonly",
+            width=2,
+        )
+        self.relay_initial_state_combo.pack(side=LEFT, padx=(0, 4))
+        Button(relay_frame, text="Set init", command=self._send_relay_initial_state).pack(side=LEFT, padx=(2, 6))
+        Label(relay_frame, text="persist").pack(side=LEFT, padx=(0, 2))
+        self.relay_persist_state_combo = ttk.Combobox(
+            relay_frame,
+            textvariable=self.relay_persist_state_var,
+            values=("0", "1"),
+            state="readonly",
+            width=2,
+        )
+        self.relay_persist_state_combo.pack(side=LEFT, padx=(0, 4))
+        Button(relay_frame, text="Set persist", command=self._send_relay_persist_state).pack(side=LEFT, padx=(2, 0))
 
         # --- Панель концевика ---
         lswitch_frame = Frame(main)
@@ -1024,6 +1073,60 @@ class BusMonitorGUI:
             self.igniter_sc_btn.config(text="Проверка КЗ: ВЫКЛ")
             self.msg_queue.put({"log": f">> Спичка (h={h}, l={l}, zone={zone}) проверка КЗ ВЫКЛ (cmd=11, val=1)"})
 
+    def _send_igniter_thresholds(self):
+        """Задать пороги спички (cmd=12): low/high (LE, мВ), retry (0/1)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        try:
+            h = int(self.igniter_h_var.get() or "1")
+            l = int(self.igniter_l_var.get() or "1")
+            low = int(self.igniter_th_low_var.get() or "0")
+            high = int(self.igniter_th_high_var.get() or "0")
+            retry = int(self.igniter_retry_var.get() or "0")
+        except ValueError:
+            self.msg_queue.put({"log": "[!] Неверные поля спички (h/l/low/high/retry)"})
+            return
+
+        if h < 0 or h > 255 or l < 0 or l > 63:
+            self.msg_queue.put({"log": "[!] Неверный адрес спички: h=0..255, l=0..63"})
+            return
+        if low < 0 or low > 65535 or high < 0 or high > 65535:
+            self.msg_queue.put({"log": "[!] Пороги должны быть в диапазоне 0..65535"})
+            return
+        retry = 1 if retry > 0 else 0
+
+        zone = self._find_active_device_zone_exact(11, h, l)
+        used_fallback = False
+        if zone is None:
+            zone = 0
+            used_fallback = True
+
+        can_id = build_can_id(11, h, l, zone, 0)  # d_type=11 (Спичка), dir=0 (запрос)
+        data = bytes([
+            12,
+            low & 0xFF,
+            (low >> 8) & 0xFF,
+            high & 0xFF,
+            (high >> 8) & 0xFF,
+            retry,
+            0,
+            0,
+        ])
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "IgniterSetThresholds"):
+            return
+
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Спичка (h={h}, l={l}) пороги low={low} high={high} retry={retry}, "
+                       f"zone=0 (fallback: нет свежего статуса) (cmd=12)"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> Спичка (h={h}, l={l}, zone={zone}) пороги low={low} high={high} retry={retry} (cmd=12)"
+            })
+
     def _send_relay_set(self, state: int):
         """Отправить команду реле cmd=10 с параметром state (0/1)."""
         if not self.ser or not self.ser.is_open:
@@ -1035,18 +1138,112 @@ class BusMonitorGUI:
         except ValueError:
             self.msg_queue.put({"log": "[!] Неверный адрес реле (h_adr, l_adr)"})
             return
-        can_id = build_can_id(17, h, l, 0, 0)  # d_type=17 (Реле), dir=0 (запрос)
+        zone = self._find_active_device_zone_exact(17, h, l)
+        used_fallback = False
+        if zone is None:
+            zone = 0
+            used_fallback = True
+
+        can_id = build_can_id(17, h, l, zone, 0)  # d_type=17 (Реле), dir=0 (запрос)
         data = bytes([10, 1 if state else 0]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)
         if not self._write_packet(pkt, "RelaySet"):
             return
-        self.msg_queue.put({"log": f">> Реле (h={h}, l={l}) {'ВКЛ' if state else 'ВЫКЛ'}"})
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Реле (h={h}, l={l}) {'ВКЛ' if state else 'ВЫКЛ'}, zone=0 "
+                       f"(fallback: нет свежего статуса)"
+            })
+        else:
+            self.msg_queue.put({"log": f">> Реле (h={h}, l={l}, zone={zone}) {'ВКЛ' if state else 'ВЫКЛ'}"})
 
     def _send_relay_on(self):
         self._send_relay_set(1)
 
     def _send_relay_off(self):
         self._send_relay_set(0)
+
+    def _relay_addr_with_zone(self) -> tuple[int, int, int, bool] | None:
+        try:
+            h = int(self.relay_h_var.get() or "1")
+            l = int(self.relay_l_var.get() or "1")
+        except ValueError:
+            self.msg_queue.put({"log": "[!] Неверный адрес реле (h_adr, l_adr)"})
+            return None
+        zone = self._find_active_device_zone_exact(17, h, l)
+        used_fallback = False
+        if zone is None:
+            zone = 0
+            used_fallback = True
+        return h, l, zone, used_fallback
+
+    def _send_relay_mode(self):
+        """Установить режим реле (cmd=11, val=0..3)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._relay_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        mode_str = (self.relay_mode_var.get() or "0").strip()
+        try:
+            mode = int(mode_str.split("-", 1)[0].strip())
+        except ValueError:
+            mode = 0
+        if mode < 0:
+            mode = 0
+        if mode > 3:
+            mode = 3
+        can_id = build_can_id(17, h, l, zone, 0)
+        data = bytes([11, mode]) + b"\x00" * 6
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "RelaySetMode"):
+            return
+        if used_fallback:
+            self.msg_queue.put({"log": f">> Реле (h={h}, l={l}) mode={mode}, zone=0 (fallback: нет свежего статуса) (cmd=11)"})
+        else:
+            self.msg_queue.put({"log": f">> Реле (h={h}, l={l}, zone={zone}) mode={mode} (cmd=11)"})
+
+    def _send_relay_initial_state(self):
+        """Установить начальное состояние реле (cmd=12, val=0/1)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._relay_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        val = 1 if (self.relay_initial_state_var.get() or "0").strip() == "1" else 0
+        can_id = build_can_id(17, h, l, zone, 0)
+        data = bytes([12, val]) + b"\x00" * 6
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "RelaySetInitial"):
+            return
+        if used_fallback:
+            self.msg_queue.put({"log": f">> Реле (h={h}, l={l}) initial_state={val}, zone=0 (fallback) (cmd=12)"})
+        else:
+            self.msg_queue.put({"log": f">> Реле (h={h}, l={l}, zone={zone}) initial_state={val} (cmd=12)"})
+
+    def _send_relay_persist_state(self):
+        """Установить флаг запоминания состояния реле (cmd=13, val=0/1)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._relay_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        val = 1 if (self.relay_persist_state_var.get() or "0").strip() == "1" else 0
+        can_id = build_can_id(17, h, l, zone, 0)
+        data = bytes([13, val]) + b"\x00" * 6
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "RelaySetPersist"):
+            return
+        if used_fallback:
+            self.msg_queue.put({"log": f">> Реле (h={h}, l={l}) persist={val}, zone=0 (fallback) (cmd=13)"})
+        else:
+            self.msg_queue.put({"log": f">> Реле (h={h}, l={l}, zone={zone}) persist={val} (cmd=13)"})
 
     def _toggle_lswitch_normal_closed(self):
         """Переключить параметр normal_closed у концевика (cmd=17, 0=NO, 1=NC)."""
