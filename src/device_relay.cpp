@@ -27,8 +27,12 @@ void VDeviceRelay::Init()
 	}
 
 	if (Config != nullptr) {
-		desired_state = (Config->initial_state != 0u) ? 1u : 0u;
 		persist_state_enabled = (Config->persist_state_enabled != 0u) ? 1u : 0u;
+		if (persist_state_enabled != 0u) {
+			desired_state = (Config->saved_state != 0u) ? 1u : 0u;
+		} else {
+			desired_state = (Config->initial_state != 0u) ? 1u : 0u;
+		}
 		feedback_inverted = (Config->feedback_inverted != 0u) ? 1u : 0u;
 		switch_delay_s = Config->switch_delay_s;
 		settle_time_ms = (Config->settle_time_ms != 0u) ? Config->settle_time_ms : 100u;
@@ -108,7 +112,7 @@ void VDeviceRelay::SavePersistentStateIfNeeded(void)
 	if (Config == nullptr || persist_state_enabled == 0u) {
 		return;
 	}
-	Config->initial_state = desired_state;
+	Config->saved_state = desired_state;
 	if (VDeviceSaveCfg != nullptr) {
 		VDeviceSaveCfg();
 	}
@@ -181,6 +185,9 @@ void VDeviceRelay::CommandCB(uint8_t Command, uint8_t *Parameters)
 		persist_state_enabled = persist;
 		if (Config != nullptr) {
 			Config->persist_state_enabled = persist;
+			if (persist != 0u) {
+				Config->saved_state = desired_state;
+			}
 		}
 		if (VDeviceSaveCfg != nullptr) {
 			VDeviceSaveCfg();

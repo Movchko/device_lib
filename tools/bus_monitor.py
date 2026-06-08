@@ -963,8 +963,13 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
         parts.append(f"режим={mode} MAX={'да' if use_max else 'нет'} T_пож={th}°C стаб={dms}мс")
     elif vd_type == 17:  # DeviceRelayConfig
         settle = _u16_le_buf(reserv, 4)
+        mode = reserv[6] if len(reserv) > 6 else 0
+        mode_names = ("нет авто", "по пожару", "по неисправности", "по концевику")
+        mode_s = mode_names[mode] if mode < len(mode_names) else str(mode)
+        saved = reserv[7] if len(reserv) > 7 else 0
         parts.append(
-            f"init={reserv[0]} persist={reserv[1]} inv_ОС={reserv[2]} задержка_перекл={reserv[3]}с ожид_ОС={settle}мс"
+            f"init={reserv[0]} persist={reserv[1]} inv_ОС={reserv[2]} "
+            f"задержка_перекл={reserv[3]}с ожид_ОС={settle}мс mode={mode}({mode_s}) saved={saved}"
         )
     elif vd_type == 15:  # DeviceButtonConfig
         kind = reserv[0]

@@ -106,19 +106,19 @@ typedef enum DeviceButtonKind {
 
 typedef struct DeviceButtonConfig {
     /* Совместимость с DeviceDPTConfig (общая часть для классификации линии) */
-	/* пока не вижу смысла в этом
+
     uint8_t mode;
     uint8_t use_max;
     uint16_t max_fire_threshold_c;
     uint16_t state_change_delay_ms;
-    */
+
 
     /* Параметры виртуальной кнопки */
     uint8_t button_kind;             /* DeviceButtonKind */
     uint8_t zones[7];                /* список зон для режима StartZone */
 
     /* резерв до полного размера VDeviceCfg::reserv (64 байта) */
-    uint8_t reserved[VDEVICE_CFG_SIZE - (1 + 7)];
+    uint8_t reserved[VDEVICE_CFG_SIZE - 14];
 } DeviceButtonConfig;
 
 
@@ -151,9 +151,9 @@ typedef struct DeviceRelayConfig {
 	uint8_t initial_state;
 
 	/* Режим "сохранение состояния":
-	 * 0 - отключено (по умолчанию),
-	 * 1 - после каждого переключения записываем текущее состояние в initial_state
-	 *     и сохраняем конфигурацию. */
+	 * 0 - отключено (по умолчанию), при Init используется initial_state;
+	 * 1 - при Init используется saved_state; после переключения по cmd=10
+	 *     текущее состояние записывается в saved_state и сохраняется конфигурация. */
 	uint8_t persist_state_enabled;
 
 	/* Инверсия обратной связи:
@@ -175,8 +175,11 @@ typedef struct DeviceRelayConfig {
 	 * 3 - переключение по открытию концевика в своей зоне */
 	uint8_t mode;
 
+	/* Сохранённое состояние (0/1), используется при persist_state_enabled=1. */
+	uint8_t saved_state;
+
 	/* резерв до полного размера VDeviceCfg::reserv (64 байта) */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 7];
+	uint8_t reserved[VDEVICE_CFG_SIZE - 8];
 } DeviceRelayConfig;
 
 typedef enum DeviceLimitSwitchFunction {
