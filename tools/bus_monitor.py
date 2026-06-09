@@ -203,6 +203,7 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
         # CAN data[3]   = Rpower (канал 0) — шаг 1 В
         # CAN data[4]   = current1         — шаг 50 мА (code * 0.05 А)
         # CAN data[5]   = current2         — шаг 50 мА
+        # CAN data[6]   = internal temp (DTS, int8)
         if len(data) >= 6:
             sec = data[1]
             power_code = data[2]
@@ -213,9 +214,11 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
             ur = float(rpower_code)    # В
             i1 = cur1_code * 0.05      # А
             i2 = cur2_code * 0.05      # А
-            return _dev_line(
-                f"  {dev_str} | t={sec}s U={u:.0f}V U_res={ur:.0f}V I1={i1:.2f}A I2={i2:.2f}A"
-            )
+            line = f"  {dev_str} | t={sec}s U={u:.0f}V U_res={ur:.0f}V I1={i1:.2f}A I2={i2:.2f}A"
+            if len(data) >= 7:
+                t_int = data[6] if data[6] < 128 else data[6] - 256
+                line += f" T={t_int}°C"
+            return _dev_line(line)
         return _dev_line(f"  {dev_str} | PPKY status (len={len(data)})")
     if parsed["d_type"] == 11 and parsed["dir"]:  # Спичка →
         # Формат backend-пакета для статуса Igniter:
@@ -295,17 +298,20 @@ def format_packet(can_id: int, data: bytes, show_raw_id: bool = False, bus_label
         return _dev_line(f"  {dev_str} | Relay status (len={len(data)})")
     if parsed["d_type"] in (13, 14, 20, 21, 22, 23) and parsed["dir"]:
         # МКУ heartbeat (cmd=0) в разных версиях прошивки:
-        #   новый:  [1]=sec, [2..4]=0, [5]=CAN active, [6]=U24(1V), [7]=CAN state
+        #   новый:  [1]=sec, [2]=DTS temp (int8), [3..4]=0, [5]=CAN active, [6]=U24(1V), [7]=CAN state
         #   legacy: [1..4]=tick32,        [5]=CAN active, [6]=0,      [7]=0
         if len(data) >= 6 and data[0] == 0:
             can_flags = int(data[5])
             can1 = "✓" if (can_flags & 0x01) else "—"
             can2 = "✓" if (can_flags & 0x02) else "—"
 
-            is_new_layout = (len(data) >= 8 and data[2] == 0 and data[3] == 0 and data[4] == 0)
+            is_new_layout = (len(data) >= 6 and data[3] == 0 and data[4] == 0)
             if is_new_layout:
                 sec = int(data[1])
                 parts = [f"t={sec}s", f"CAN1={can1}", f"CAN2={can2}"]
+                if len(data) >= 3:
+                    t_int = data[2] if data[2] < 128 else data[2] - 256
+                    parts.append(f"T={t_int}°C")
                 if len(data) >= 7:
                     parts.append(f"U24={int(data[6]):.0f}V")
             else:
