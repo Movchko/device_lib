@@ -91,6 +91,12 @@ SVC_GET_CONFIG_SIZE = 150
 SVC_GET_CONFIG_CRC  = 151
 SVC_GET_CONFIG_WORD = 152
 
+# Пожарные сервисные команды (backend.h)
+SVC_FIRE_START_EXTINGUISHMENT = 142
+START_EXT_DELAY_FROM_CMD = 0
+START_EXT_DELAY_MODULE_ONLY = 1
+START_EXT_DELAY_ZONE_AND_MODULE = 2
+
 
 def is_service_packet(data: bytes) -> bool:
     """Пакет считается сервисным, если data[0] — сервисная команда (128–130, 150–155, 200)."""

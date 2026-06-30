@@ -60,8 +60,8 @@ DeviceDPTLineState VDeviceLimitSwitch::GetTriggeredLineState() const {
 
 uint8_t VDeviceLimitSwitch::IsRawTriggeredNow() const {
 	DeviceDPTLineState line = GetLineState();
-	uint8_t triggered = (line == DeviceDPTLineState_Press || line == DeviceDPTLineState_Fault) ? 1u : 0u;
-	return normalClosed ? (triggered ? 0u : 1u) : triggered;
+	/* NC/NO учтён в app (App_MapLswitchResistanceForLib). */
+	return (line == DeviceDPTLineState_Press || line == DeviceDPTLineState_Fault) ? 1u : 0u;
 }
 
 void VDeviceLimitSwitch::SendPpkuModeCommand(uint8_t mode) const {

@@ -38,6 +38,16 @@ enum DeviceDPTLineState {
 	DeviceDPTLineState_Fault  = 5   /* Неисправность */
 };
 
+/* NC/NO: 0=NO (срабатывание при Press[/Fault]), 1=NC (срабатывание при отсутствии Press[/Fault]). */
+static inline uint8_t DeviceDPT_IsLineTriggered(DeviceDPTLineState line, uint8_t normal_closed, uint8_t include_fault)
+{
+	uint8_t triggered = (line == DeviceDPTLineState_Press) ? 1u : 0u;
+	if (include_fault && line == DeviceDPTLineState_Fault) {
+		triggered = 1u;
+	}
+	return normal_closed ? (triggered ? 0u : 1u) : triggered;
+}
+
 /* Legacy-режим (исторически использовался одним классом для DPT/концевика/кнопки).
  * Теперь VDeviceDPT работает как "чистый ДПТ"; значения оставлены для совместимости config/tools.
  * 0 - ДПТ

@@ -8,13 +8,21 @@
  * По умолчанию weak-реализация пустая. */
 extern "C" void VDeviceButton_SendStartSP(void);
 
+/* Локальный пуск спичек на МКУ (реализация в app): zone=0 — все зоны. */
+extern "C" void VDeviceButton_OnStartExtinguishment(uint8_t zone,
+                                                    uint8_t zone_delay_s,
+                                                    uint8_t module_delay_s,
+                                                    uint8_t launch_type);
+
 class VDeviceButton : public VDeviceDPT {
 protected:
 	DeviceButtonConfig* ButtonCfg;
 	DeviceButtonKind ButtonKind;
 	uint8_t ZonesToStart[7];
-	DeviceDPTLineState LastLineState;
+	uint8_t normalClosed;
+	uint8_t lastEffectivePressed;
 
+	uint8_t IsEffectivePressed() const;
 	DeviceDPTLineState GetTriggeredLineState() const override;
 	virtual void OnPressEdge(void);
 

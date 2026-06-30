@@ -251,7 +251,7 @@ void SendAllMessage(uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t bus) {
 	data[0] = Cmd;
 	memcpy(&data[1], Data, 7);
 	can_id.ID = 0;
-	can_id.field.dir = 1;
+	can_id.field.dir = 0;
 	can_id.field.d_type = 0;
 	can_id.field.h_adr = 0;
 	can_id.field.l_adr = 0;
@@ -276,14 +276,93 @@ void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t b
     SendMessageFull(can_id, data, Now, bus);
 }
 
+uint8_t Backend_IsIgniterBroadcastId(uint32_t msg_id)
+{
+	can_ext_id_t id;
+	id.ID = msg_id & 0x0FFFFFFFu;
+	return (id.field.d_type == 0u && id.field.h_adr == 0u &&
+	        ((id.field.l_adr & 0x3Fu) == 0u)) ? 1u : 0u;
+}
+
+uint8_t Backend_StartExtinguishZoneParamMatches(uint8_t cmd_zone, uint8_t our_zone)
+{
+	if (cmd_zone == 0u) {
+		return 1u;
+	}
+	return (cmd_zone == (our_zone & 0x7Fu)) ? 1u : 0u;
+}
+
+uint8_t Backend_StartExtinguishZoneMatches(uint32_t msg_id, uint8_t payload_zone, uint8_t our_zone)
+{
+	can_ext_id_t id;
+	id.ID = msg_id & 0x0FFFFFFFu;
+	uint8_t cmd_zone = (uint8_t)(id.field.zone & 0x7Fu);
+	if (cmd_zone == 0u) {
+		cmd_zone = payload_zone;
+	}
+	return Backend_StartExtinguishZoneParamMatches(cmd_zone, our_zone);
+}
+
+static uint8_t Backend_ClampDelaySecU32(uint32_t delay_s)
+{
+	if (delay_s > 255u) {
+		return 255u;
+	}
+	return (uint8_t)delay_s;
+}
+
+void Backend_ResolveIgniterStartDelays(uint8_t launch_type,
+                                       uint8_t cmd_zone_delay,
+                                       uint8_t cmd_module_delay,
+                                       uint8_t ign_slot,
+                                       uint32_t cfg_zone_delay,
+                                       const uint32_t *cfg_module_delay,
+                                       uint8_t cfg_module_delay_count,
+                                       uint8_t *out_zone_delay,
+                                       uint8_t *out_module_delay)
+{
+	uint8_t zd = 0u;
+	uint8_t md = 0u;
+	uint32_t slot_md = 0u;
+
+	if (cfg_module_delay != NULL && ign_slot < cfg_module_delay_count) {
+		slot_md = cfg_module_delay[ign_slot];
+	}
+
+	switch (launch_type) {
+	case START_EXT_DELAY_MODULE_ONLY:
+		zd = 0u;
+		md = Backend_ClampDelaySecU32(slot_md);
+		break;
+
+	case START_EXT_DELAY_ZONE_AND_MODULE:
+		zd = Backend_ClampDelaySecU32(cfg_zone_delay);
+		md = Backend_ClampDelaySecU32(slot_md);
+		break;
+
+	case START_EXT_DELAY_FROM_CMD:
+	default:
+		zd = cmd_zone_delay;
+		md = cmd_module_delay;
+		break;
+	}
+
+	if (out_zone_delay != NULL) {
+		*out_zone_delay = zd;
+	}
+	if (out_module_delay != NULL) {
+		*out_module_delay = md;
+	}
+}
+
 void FireServiceCmd(uint32_t MsgID, uint8_t Command, uint8_t *MsgData, uint8_t bus) {
  // здесь фильтрация MsgID, чтобы не дублировать это в каждом утсройстве
-	/* Broadcast-сообщение: адрес (zone, h_adr, l_adr) = 0, тип устройства задан */
+	/* Broadcast-сообщение: h_adr/l_adr=0; zone=0 (все) или zone=наша зона */
 	can_ext_id_t id;
 	id.ID = 0;
 	id.ID = MsgID;
 	uint8_t isBroadcast = 0;
-	uint8_t is_our_cmd;
+	uint8_t is_our_cmd = 0;
 
 	if (((id.field.zone == 0) || (id.field.zone == BoardDevicesList[0].zone)) && (id.field.h_adr == 0) && (id.field.l_adr == 0))
 		isBroadcast = 1;
@@ -433,9 +512,10 @@ static void UpdateServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 			}
 
 			if(SetUpdateWord(num_word, word)) {
-				/*
+
 				uint32_t check_word = 0;
 				if(GetUpdateWord(num_word, &check_word) && (check_word == word)) {
+					uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
 					Data[0] = MsgData[0];
 					Data[1] = MsgData[1];
 					Data[2] = MsgData[2];
@@ -443,7 +523,7 @@ static void UpdateServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 						Data[i + 3] = (check_word >> (24 - 8 * i)) & 0xFF;
 					}
 					SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
-				}*/
+				}
 			}
 		}break;
 		case ServiceCmd_UpdateTransmit: {

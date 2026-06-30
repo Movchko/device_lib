@@ -39,6 +39,9 @@ from bus_monitor import (
     SVC_GET_CONFIG_SIZE,
     SVC_GET_CONFIG_CRC,
     SVC_GET_CONFIG_WORD,
+    SVC_FIRE_START_EXTINGUISHMENT,
+    START_EXT_DELAY_FROM_CMD,
+    START_EXT_DELAY_MODULE_ONLY,
     IGNITER_STATUS,
     IGNITER_LINE,
 )
@@ -107,7 +110,7 @@ class BusMonitorGUI:
         self.root = Tk()
         self.root.title("BSU Config — ручная отправка команд")
         self.root.minsize(500, 400)
-        self.root.geometry("700x550")
+        self.root.geometry("900x620")
 
         self.ser: serial.Serial | None = None
         self.reader_thread: threading.Thread | None = None
@@ -148,6 +151,7 @@ class BusMonitorGUI:
         self.igniter_th_low_var = StringVar(value="1000")
         self.igniter_th_high_var = StringVar(value="3000")
         self.igniter_retry_var = StringVar(value="1")
+        self.igniter_start_all_module_delay_var = BooleanVar(value=False)
         self.igniter_status_var = StringVar(value="—")
         self.igniter_sc_check_enabled = True
         self.relay_h_var = StringVar(value="1")
@@ -161,9 +165,35 @@ class BusMonitorGUI:
         self.relay_mode_var = StringVar(value=self.relay_mode_options[0])
         self.relay_initial_state_var = StringVar(value="0")
         self.relay_persist_state_var = StringVar(value="0")
+        self.button_h_var = StringVar(value="1")
+        self.button_l_var = StringVar(value="1")
+        self.button_mode_options = (
+            "0 - ПУСК СП",
+            "1 - Пуск всех зон",
+            "2 - Пуск по списку зон",
+        )
+        self.button_mode_var = StringVar(value=self.button_mode_options[0])
+        self.button_zones_var = StringVar(value="1")
+        self.button_nc_options = (
+            "0 - NO (нормально открытый)",
+            "1 - NC (нормально закрытый)",
+        )
+        self.button_nc_var = StringVar(value=self.button_nc_options[0])
         self.lswitch_h_var = StringVar(value="1")
         self.lswitch_l_var = StringVar(value="1")
-        self.lswitch_normal_closed = False  # False=NO, True=NC
+        self.lswitch_function_options = (
+            "1 - неисправность",
+            "2 - ручной режим ППКУ",
+            "3 - автоматический режим ППКУ",
+            "4 - пауза пуска",
+        )
+        self.lswitch_function_var = StringVar(value=self.lswitch_function_options[0])
+        self.lswitch_trigger_delay_var = StringVar(value="0")
+        self.lswitch_nc_options = (
+            "0 - NO (нормально открытый)",
+            "1 - NC (нормально закрытый)",
+        )
+        self.lswitch_nc_var = StringVar(value=self.lswitch_nc_options[0])
         self.mcu_zone_type_options = (
             "13 - МКУ_IGN",
             "14 - МКУ_TC",
@@ -293,6 +323,16 @@ class BusMonitorGUI:
         Label(igniter_frame, text="l_adr").pack(side=LEFT, padx=(0, 2))
         Entry(igniter_frame, textvariable=self.igniter_l_var, width=3).pack(side=LEFT, padx=(0, 8))
         Button(igniter_frame, text="Запуск", command=self._send_igniter_start).pack(side=LEFT, padx=(8, 0))
+        Button(
+            igniter_frame,
+            text="Пуск всех спичек",
+            command=self._send_start_all_igniters,
+        ).pack(side=LEFT, padx=(6, 0))
+        ttk.Checkbutton(
+            igniter_frame,
+            text="задержка модуля",
+            variable=self.igniter_start_all_module_delay_var,
+        ).pack(side=LEFT, padx=(6, 0))
         self.igniter_sc_btn = Button(
             igniter_frame,
             text="Проверка КЗ: ВКЛ",
@@ -351,6 +391,38 @@ class BusMonitorGUI:
         self.relay_persist_state_combo.pack(side=LEFT, padx=(0, 4))
         Button(relay_frame, text="Set persist", command=self._send_relay_persist_state).pack(side=LEFT, padx=(2, 0))
 
+        # --- Панель кнопки ---
+        button_frame = Frame(main)
+        button_frame.pack(fill=X, pady=(0, 8))
+        Label(button_frame, text="Кнопка:").pack(side=LEFT, padx=(0, 4))
+        Label(button_frame, text="h_adr").pack(side=LEFT, padx=(8, 2))
+        Entry(button_frame, textvariable=self.button_h_var, width=3).pack(side=LEFT, padx=(0, 8))
+        Label(button_frame, text="l_adr").pack(side=LEFT, padx=(0, 2))
+        Entry(button_frame, textvariable=self.button_l_var, width=3).pack(side=LEFT, padx=(0, 8))
+        Label(button_frame, text="режим").pack(side=LEFT, padx=(10, 2))
+        self.button_mode_combo = ttk.Combobox(
+            button_frame,
+            textvariable=self.button_mode_var,
+            values=self.button_mode_options,
+            state="readonly",
+            width=22,
+        )
+        self.button_mode_combo.pack(side=LEFT, padx=(0, 4))
+        Button(button_frame, text="Set mode", command=self._send_button_mode).pack(side=LEFT, padx=(2, 6))
+        Label(button_frame, text="зоны").pack(side=LEFT, padx=(0, 2))
+        Entry(button_frame, textvariable=self.button_zones_var, width=12).pack(side=LEFT, padx=(0, 4))
+        Button(button_frame, text="Set zones", command=self._send_button_zones).pack(side=LEFT, padx=(2, 6))
+        Label(button_frame, text="тип").pack(side=LEFT, padx=(0, 2))
+        self.button_nc_combo = ttk.Combobox(
+            button_frame,
+            textvariable=self.button_nc_var,
+            values=self.button_nc_options,
+            state="readonly",
+            width=26,
+        )
+        self.button_nc_combo.pack(side=LEFT, padx=(0, 4))
+        Button(button_frame, text="Set NC", command=self._send_button_normal_closed).pack(side=LEFT, padx=(2, 0))
+
         # --- Панель концевика ---
         lswitch_frame = Frame(main)
         lswitch_frame.pack(fill=X, pady=(0, 8))
@@ -359,12 +431,29 @@ class BusMonitorGUI:
         Entry(lswitch_frame, textvariable=self.lswitch_h_var, width=3).pack(side=LEFT, padx=(0, 8))
         Label(lswitch_frame, text="l_adr").pack(side=LEFT, padx=(0, 2))
         Entry(lswitch_frame, textvariable=self.lswitch_l_var, width=3).pack(side=LEFT, padx=(0, 8))
-        self.lswitch_mode_btn = Button(
+        Label(lswitch_frame, text="функция").pack(side=LEFT, padx=(10, 2))
+        self.lswitch_function_combo = ttk.Combobox(
             lswitch_frame,
-            text="Тип: NO (нормально открытый)",
-            command=self._toggle_lswitch_normal_closed
+            textvariable=self.lswitch_function_var,
+            values=self.lswitch_function_options,
+            state="readonly",
+            width=28,
         )
-        self.lswitch_mode_btn.pack(side=LEFT, padx=(8, 0))
+        self.lswitch_function_combo.pack(side=LEFT, padx=(0, 4))
+        Button(lswitch_frame, text="Set func", command=self._send_lswitch_function).pack(side=LEFT, padx=(2, 6))
+        Label(lswitch_frame, text="задержка, с").pack(side=LEFT, padx=(0, 2))
+        Entry(lswitch_frame, textvariable=self.lswitch_trigger_delay_var, width=3).pack(side=LEFT, padx=(0, 4))
+        Button(lswitch_frame, text="Set delay", command=self._send_lswitch_trigger_delay).pack(side=LEFT, padx=(2, 6))
+        Label(lswitch_frame, text="тип").pack(side=LEFT, padx=(0, 2))
+        self.lswitch_nc_combo = ttk.Combobox(
+            lswitch_frame,
+            textvariable=self.lswitch_nc_var,
+            values=self.lswitch_nc_options,
+            state="readonly",
+            width=26,
+        )
+        self.lswitch_nc_combo.pack(side=LEFT, padx=(0, 4))
+        Button(lswitch_frame, text="Set NC", command=self._send_lswitch_normal_closed).pack(side=LEFT, padx=(2, 0))
 
         # --- Панель назначения зоны МКУ (cmd=20) ---
         mcu_zone_frame = Frame(main)
@@ -1041,6 +1130,48 @@ class BusMonitorGUI:
         else:
             self.msg_queue.put({"log": f">> Спичка (h={h}, l={l}, zone={zone}) Запуск"})
 
+    def _send_start_all_igniters(self):
+        """Широковещательный пуск всех спичек: StartExtinguishment, zone=0, задержки 0.
+
+        Тип запуска: FROM_CMD (чекбокс снят) или MODULE_ONLY (чекбокс «задержка модуля»).
+        """
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+
+        zone = 0
+        zone_delay = 0
+        module_delay = 0
+        if self.igniter_start_all_module_delay_var.get():
+            launch_type = START_EXT_DELAY_MODULE_ONLY
+            type_label = "MODULE_ONLY"
+        else:
+            launch_type = START_EXT_DELAY_FROM_CMD
+            type_label = "FROM_CMD"
+
+        # Broadcast: d_type/h_adr/l_adr/zone=0, dir=0 (как VDeviceButton_SendStartExtinguishment).
+        can_id = build_can_id(0, 0, 0, zone, 0)
+        data = bytes([
+            SVC_FIRE_START_EXTINGUISHMENT,
+            zone,
+            zone_delay,
+            module_delay,
+            launch_type,
+            0,
+            0,
+            0,
+        ])
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "StartAllIgniters"):
+            return
+        self.msg_queue.put({
+            "log": (
+                f">> Пуск всех спичек (broadcast): cmd={SVC_FIRE_START_EXTINGUISHMENT}, "
+                f"zone={zone}, z_delay={zone_delay}, m_delay={module_delay}, "
+                f"type={launch_type}({type_label})  data=[{data.hex()}]"
+            )
+        })
+
     def _toggle_igniter_sc_check(self):
         """Переключить проверку КЗ у спички (cmd=11, val: 0=вкл проверку, 1=выкл)."""
         if not self.ser or not self.ser.is_open:
@@ -1245,44 +1376,238 @@ class BusMonitorGUI:
         else:
             self.msg_queue.put({"log": f">> Реле (h={h}, l={l}, zone={zone}) persist={val} (cmd=13)"})
 
-    def _toggle_lswitch_normal_closed(self):
-        """Переключить параметр normal_closed у концевика (cmd=17, 0=NO, 1=NC)."""
+    def _button_addr_with_zone(self) -> tuple[int, int, int, bool] | None:
+        try:
+            h = int(self.button_h_var.get() or "1")
+            l = int(self.button_l_var.get() or "1")
+        except ValueError:
+            self.msg_queue.put({"log": "[!] Неверный адрес кнопки (h_adr, l_adr)"})
+            return None
+        zone = self._find_active_device_zone_exact(15, h, l)
+        used_fallback = False
+        if zone is None:
+            zone = 0
+            used_fallback = True
+        return h, l, zone, used_fallback
+
+    def _send_button_mode(self):
+        """Установить вид кнопки (cmd=15, val=0..2)."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
+        addr = self._button_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        mode_str = (self.button_mode_var.get() or "0").strip()
+        try:
+            mode = int(mode_str.split("-", 1)[0].strip())
+        except ValueError:
+            mode = 0
+        if mode < 0:
+            mode = 0
+        if mode > 2:
+            mode = 2
+        can_id = build_can_id(15, h, l, zone, 0)
+        data = bytes([15, mode]) + b"\x00" * 6
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "ButtonSetMode"):
+            return
+        mode_label = self.button_mode_options[mode] if mode < len(self.button_mode_options) else str(mode)
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Кнопка (h={h}, l={l}) mode={mode} ({mode_label}), "
+                       f"zone=0 (fallback: нет свежего статуса) (cmd=15)"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> Кнопка (h={h}, l={l}, zone={zone}) mode={mode} ({mode_label}) (cmd=15)"
+            })
+
+    def _send_button_zones(self):
+        """Установить список зон для режима StartZone (cmd=16, 7 байт)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._button_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        zones_raw = (self.button_zones_var.get() or "").replace(";", ",").split(",")
+        zones: list[int] = []
+        for part in zones_raw:
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                z = int(part)
+            except ValueError:
+                self.msg_queue.put({"log": "[!] Зоны: целые числа через запятую (до 7)"})
+                return
+            if z < 0 or z > 127:
+                self.msg_queue.put({"log": "[!] Номер зоны должен быть 0..127"})
+                return
+            zones.append(z)
+        if len(zones) > 7:
+            self.msg_queue.put({"log": "[!] Не более 7 зон"})
+            return
+        zone_bytes = bytes(zones + [0] * (7 - len(zones)))
+        can_id = build_can_id(15, h, l, zone, 0)
+        data = bytes([16]) + zone_bytes
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "ButtonSetZones"):
+            return
+        zones_s = ",".join(str(z) for z in zones) if zones else "(пусто)"
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Кнопка (h={h}, l={l}) zones=[{zones_s}], "
+                       f"zone=0 (fallback: нет свежего статуса) (cmd=16)"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> Кнопка (h={h}, l={l}, zone={zone}) zones=[{zones_s}] (cmd=16)"
+            })
+
+    def _send_button_normal_closed(self):
+        """Установить тип кнопки NO/NC (cmd=17, 0=NO, 1=NC)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._button_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        nc_str = (self.button_nc_var.get() or "0").strip()
+        try:
+            val = int(nc_str.split("-", 1)[0].strip())
+        except ValueError:
+            val = 0
+        val = 1 if val else 0
+        can_id = build_can_id(15, h, l, zone, 0)
+        data = bytes([17, val]) + b"\x00" * 6
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "ButtonSetNormalClosed"):
+            return
+        nc_label = self.button_nc_options[val] if val < len(self.button_nc_options) else str(val)
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Кнопка (h={h}, l={l}) тип={nc_label}, "
+                       f"zone=0 (fallback: нет свежего статуса) (cmd=17, val={val})"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> Кнопка (h={h}, l={l}, zone={zone}) тип={nc_label} (cmd=17, val={val})"
+            })
+
+    def _lswitch_addr_with_zone(self) -> tuple[int, int, int, bool] | None:
         try:
             h = int(self.lswitch_h_var.get() or "1")
             l = int(self.lswitch_l_var.get() or "1")
         except ValueError:
             self.msg_queue.put({"log": "[!] Неверный адрес концевика (h_adr, l_adr)"})
-            return
-
-        target_nc = not self.lswitch_normal_closed
-        val = 1 if target_nc else 0  # device_lswitch.cpp: 0=NO, 1=NC
-
+            return None
         zone = self._find_active_device_zone_exact(16, h, l)
         used_fallback = False
         if zone is None:
             zone = 0
             used_fallback = True
+        return h, l, zone, used_fallback
 
-        can_id = build_can_id(16, h, l, zone, 0)  # d_type=16 (LSWITCH), dir=0 (запрос)
+    def _send_lswitch_trigger_delay(self):
+        """Установить задержку срабатывания концевика (cmd=15, сек)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._lswitch_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        try:
+            delay = int(self.lswitch_trigger_delay_var.get() or "0")
+        except ValueError:
+            self.msg_queue.put({"log": "[!] Задержка: целое число 0..255"})
+            return
+        if delay < 0 or delay > 255:
+            self.msg_queue.put({"log": "[!] Задержка должна быть 0..255 с"})
+            return
+        can_id = build_can_id(16, h, l, zone, 0)
+        data = bytes([15, delay]) + b"\x00" * 6
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "LSwitchSetDelay"):
+            return
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Концевик (h={h}, l={l}) trigger_delay={delay}с, "
+                       f"zone=0 (fallback: нет свежего статуса) (cmd=15)"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> Концевик (h={h}, l={l}, zone={zone}) trigger_delay={delay}с (cmd=15)"
+            })
+
+    def _send_lswitch_function(self):
+        """Установить функцию концевика (cmd=16, val=1..4)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._lswitch_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        func_str = (self.lswitch_function_var.get() or "1").strip()
+        try:
+            func = int(func_str.split("-", 1)[0].strip())
+        except ValueError:
+            func = 1
+        if func < 1:
+            func = 1
+        if func > 4:
+            func = 4
+        can_id = build_can_id(16, h, l, zone, 0)
+        data = bytes([16, func]) + b"\x00" * 6
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "LSwitchSetFunction"):
+            return
+        func_label = self.lswitch_function_options[func - 1] if 1 <= func <= len(self.lswitch_function_options) else str(func)
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Концевик (h={h}, l={l}) function={func} ({func_label}), "
+                       f"zone=0 (fallback: нет свежего статуса) (cmd=16)"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> Концевик (h={h}, l={l}, zone={zone}) function={func} ({func_label}) (cmd=16)"
+            })
+
+    def _send_lswitch_normal_closed(self):
+        """Установить тип концевика NO/NC (cmd=17, 0=NO, 1=NC)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._lswitch_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        nc_str = (self.lswitch_nc_var.get() or "0").strip()
+        try:
+            val = int(nc_str.split("-", 1)[0].strip())
+        except ValueError:
+            val = 0
+        val = 1 if val else 0
+        can_id = build_can_id(16, h, l, zone, 0)
         data = bytes([17, val]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)
         if not self._write_packet(pkt, "LSwitchSetNormalClosed"):
             return
-
-        self.lswitch_normal_closed = target_nc
-        mode_text = "NC (нормально закрытый)" if self.lswitch_normal_closed else "NO (нормально открытый)"
-        self.lswitch_mode_btn.config(text=f"Тип: {mode_text}")
+        nc_label = self.lswitch_nc_options[val] if val < len(self.lswitch_nc_options) else str(val)
         if used_fallback:
             self.msg_queue.put({
-                "log": f">> Концевик (h={h}, l={l}) тип={mode_text}, zone=0 (fallback: нет свежего статуса) "
-                       f"(cmd=17, val={val})"
+                "log": f">> Концевик (h={h}, l={l}) тип={nc_label}, "
+                       f"zone=0 (fallback: нет свежего статуса) (cmd=17, val={val})"
             })
         else:
             self.msg_queue.put({
-                "log": f">> Концевик (h={h}, l={l}, zone={zone}) тип={mode_text} (cmd=17, val={val})"
+                "log": f">> Концевик (h={h}, l={l}, zone={zone}) тип={nc_label} (cmd=17, val={val})"
             })
 
     def _find_active_device_addr(self, d_type: int, h_adr: int) -> tuple[int, int] | None:

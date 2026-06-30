@@ -81,6 +81,10 @@ bool VDeviceIgniter::IsPwmActive() const {
 	       (burn_phase == BURN_PHASE_RAMP || burn_phase == BURN_PHASE_HOLD);
 }
 
+bool VDeviceIgniter::IsBurnRunning() const {
+	return State == DeviceIgniterState_Run;
+}
+
 void VDeviceIgniter::UpdateLineFromAdcMv(uint16_t adc_mv) {
 	/* Передаём текущее измеренное значение линии в статус (2 байта). */
 	measured_resistance_ohm = adc_mv;
@@ -146,8 +150,9 @@ void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 	switch(Command) {
 		case 10: {
 			/* Если на момент команды линия в КЗ, не запускаем исполнитель,
-			 * но считаем команду обработанной: выставляем start/end ack. */
-			if (LineState == DeviceIgniterLineState_Short) {
+			 * но считаем команду обработанной: выставляем start/end ack.
+			 * disable_sc_check отключает эту проверку (как и SetLineState). */
+			if ((LineState == DeviceIgniterLineState_Short) && (disable_sc_check == 0)) {
 				State = DeviceIgniterState_Idle;
 				Status = DeviceIgniterStatus_Idle;
 				run_elapsed_ms = 0;

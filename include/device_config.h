@@ -100,7 +100,7 @@ typedef struct DeviceDPTConfig {
 /* Вид виртуальной кнопки */
 typedef enum DeviceButtonKind {
     DeviceButtonKind_StartSP   = 0, /* имитация нажатия ПУСК СП на ППКУ (через callback из app) */
-    DeviceButtonKind_StartAll  = 1, /* широковещательный StartExtinguishment, data[0]=1 */
+    DeviceButtonKind_StartAll  = 1, /* широковещательный StartExtinguishment, zone=0 */
     DeviceButtonKind_StartZone = 2  /* запуск зон из массива zones[7] */
 } DeviceButtonKind;
 
@@ -116,9 +116,10 @@ typedef struct DeviceButtonConfig {
     /* Параметры виртуальной кнопки */
     uint8_t button_kind;             /* DeviceButtonKind */
     uint8_t zones[7];                /* список зон для режима StartZone */
+    uint8_t normal_closed;           /* 0=NO, 1=NC */
 
     /* резерв до полного размера VDeviceCfg::reserv (64 байта) */
-    uint8_t reserved[VDEVICE_CFG_SIZE - 14];
+    uint8_t reserved[VDEVICE_CFG_SIZE - 15];
 } DeviceButtonConfig;
 
 

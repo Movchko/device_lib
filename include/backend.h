@@ -95,6 +95,11 @@ enum ServiceCmd {
 	ServiceCmd_CircSetAdr 		= 200,
 };
 
+/* Тип задержки в StartExtinguishment, байт data[4] (после zone_delay/module_delay). */
+#define START_EXT_DELAY_FROM_CMD         0u /* задержки из полей команды [2],[3] */
+#define START_EXT_DELAY_MODULE_ONLY      1u /* zone_delay=0, module_delay из MKUCfg */
+#define START_EXT_DELAY_ZONE_AND_MODULE  2u /* обе задержки из MKUCfg */
+
 
 // bus - битовая маска - номер шины (0b01 - CAN 0, 0b10 - CAN 1)
 void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus, uint8_t dir);
@@ -110,6 +115,20 @@ void FireServiceCmd(uint32_t MsgID, uint8_t Command, uint8_t *MsgData, uint8_t b
 void SendMessage(uint8_t Dev, uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t bus);
 void SendMessageFull(can_ext_id_t can_id, uint8_t *Data, uint8_t Now, uint8_t bus);
 void SendAllMessage(uint8_t Cmd, uint8_t *Data, uint8_t Now, uint8_t bus);
+
+/* Широковещательный пуск спичек: zone/h_adr/l_adr/d_type в ID = 0 (или zone в ID для зонального). */
+uint8_t Backend_IsIgniterBroadcastId(uint32_t msg_id);
+uint8_t Backend_StartExtinguishZoneParamMatches(uint8_t cmd_zone, uint8_t our_zone);
+uint8_t Backend_StartExtinguishZoneMatches(uint32_t msg_id, uint8_t payload_zone, uint8_t our_zone);
+void Backend_ResolveIgniterStartDelays(uint8_t launch_type,
+                                       uint8_t cmd_zone_delay,
+                                       uint8_t cmd_module_delay,
+                                       uint8_t ign_slot,
+                                       uint32_t cfg_zone_delay,
+                                       const uint32_t *cfg_module_delay,
+                                       uint8_t cfg_module_delay_count,
+                                       uint8_t *out_zone_delay,
+                                       uint8_t *out_module_delay);
 
 void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr);
 
@@ -166,9 +185,9 @@ void ResetConfig();
 void AplyConfig();
 
 // работа с удаленным обновлением прошивки
-uint8_t SetUpdateWord(uint32_t num, uint32_t word);                 // записать 4-байтное слово обновления
-uint8_t GetUpdateWord(uint32_t num, uint32_t *word);                // прочитать записанное слово (для валидации)
-uint8_t FinishUpdateTransmit(void);                                  // финализация/дозапись, затем перезагрузка
+__attribute__((weak)) uint8_t SetUpdateWord(uint32_t num, uint32_t word);                 // записать 4-байтное слово обновления
+__attribute__((weak)) uint8_t GetUpdateWord(uint32_t num, uint32_t *word);                // прочитать записанное слово (для валидации)
+__attribute__((weak)) uint8_t FinishUpdateTransmit(void);                                  // финализация/дозапись, затем перезагрузка
 uint32_t GetAppVersion(void);                                        // версия приложения (4 байта)
 
 

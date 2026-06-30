@@ -90,6 +90,9 @@ public:
 	/* true = ШИМ активен (разгон или удержание), ADC невалиден */
 	bool IsPwmActive() const;
 
+	/* true = идёт цикл прожига (State == Run) */
+	bool IsBurnRunning() const;
+
 	/* Текущий уровень ШИМ (для низкоуровневого драйвера) */
 	uint16_t GetPwm() const { return pwm_value; }
 };

@@ -9,6 +9,8 @@
 #include <stdarg.h>
 
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "winmm.lib")
+#pragma comment(lib, "advapi32.lib")
 
 #define APP_TITLE L"BSU CAN Firmware Updater (C)"
 
@@ -24,6 +26,13 @@
 #define IDC_PROGRESS        110
 #define IDC_BTN_SELECT_TARGET 111
 #define IDC_BTN_FORCE_VERSION 112
+#define IDC_CHK_VERIFY        113
+#define IDC_EDIT_BATCH        114
+
+#define DEFAULT_BATCH_SIZE    8u
+#define MIN_BATCH_SIZE        1u
+#define MAX_BATCH_SIZE        128u
+#define BATCH_SLEEP_MS        1u
 
 #define WM_APP_LOG          (WM_APP + 1)
 #define WM_APP_PACKET       (WM_APP + 2)
@@ -38,7 +47,8 @@
 #define CMD_UPDATE_TRANSMIT 158u
 #define CMD_GET_VERSION     159u
 #define ACK_WAIT_MS_FIRST_WORD 2500u
-#define ACK_WAIT_MS_NORMAL 30u
+#define ACK_WAIT_MS_NORMAL     50u
+#define ACK_WAIT_MS_QUAD_FLUSH 200u
 #define ACK_RETRY_FIRST_WORD 4
 #define ACK_RETRY_NORMAL 8
 
@@ -61,14 +71,18 @@ typedef struct {
 
 typedef struct {
     int active;
-    uint32_t expect_word_idx;
-    uint32_t expect_word_value;
-    int matched;
+    uint32_t batch_start;
+    uint32_t batch_len;
+    uint32_t expect_idx[MAX_BATCH_SIZE];
+    uint32_t expect_word[MAX_BATCH_SIZE];
+    uint8_t acked[MAX_BATCH_SIZE];
+    uint32_t acked_count;
 } AckState;
 
 static HWND g_hwnd = NULL;
 static HWND g_hPort = NULL, g_hConnect = NULL, g_hDevices = NULL, g_hFile = NULL;
 static HWND g_hStart = NULL, g_hStop = NULL, g_hLog = NULL, g_hProgress = NULL;
+static HWND g_hVerify = NULL, g_hBatch = NULL;
 
 static HANDLE g_hSerial = INVALID_HANDLE_VALUE;
 static HANDLE g_hReaderThread = NULL;
@@ -148,9 +162,17 @@ static void HandleAckFastPath(uint32_t can_id, const uint8_t data[8]) {
                     ((uint32_t)data[6] << 8) | data[7];
 
     EnterCriticalSection(&g_ackCs);
-    if (g_ack.active && idx == g_ack.expect_word_idx && word == g_ack.expect_word_value) {
-        g_ack.matched = 1;
-        WakeAllConditionVariable(&g_ackCv);
+    if (g_ack.active) {
+        for (uint32_t s = 0; s < g_ack.batch_len; s++) {
+            if (!g_ack.acked[s] &&
+                idx == g_ack.expect_idx[s] &&
+                word == g_ack.expect_word[s]) {
+                g_ack.acked[s] = 1;
+                g_ack.acked_count++;
+                WakeAllConditionVariable(&g_ackCv);
+                break;
+            }
+        }
     }
     LeaveCriticalSection(&g_ackCs);
 }
@@ -164,8 +186,7 @@ static int SerialWrite(const uint8_t *buf, DWORD sz) {
     return ok && wr == sz;
 }
 
-static int SendBsuCanPacket(uint32_t can_id, const uint8_t data[8], uint8_t bus_type) {
-    uint8_t pkt[BSU_PKT_SIZE_CAN];
+static void BuildBsuCanPacket(uint8_t *pkt, uint32_t can_id, const uint8_t data[8], uint8_t bus_type) {
     pkt[0] = BSU_PREAMBLE0;
     pkt[1] = BSU_PREAMBLE1;
     pkt[2] = (uint8_t)(BSU_PKT_SIZE_CAN & 0xFF);
@@ -182,17 +203,91 @@ static int SendBsuCanPacket(uint32_t can_id, const uint8_t data[8], uint8_t bus_
     uint16_t crc = BsuChecksum(pkt, 20);
     pkt[20] = (uint8_t)(crc & 0xFF);
     pkt[21] = (uint8_t)(crc >> 8);
+}
+
+static int SendBsuCanPacket(uint32_t can_id, const uint8_t data[8], uint8_t bus_type) {
+    uint8_t pkt[BSU_PKT_SIZE_CAN];
+    BuildBsuCanPacket(pkt, can_id, data, bus_type);
     return SerialWrite(pkt, sizeof(pkt));
 }
 
-static void RefreshPorts(void) {
-    SendMessageW(g_hPort, CB_RESETCONTENT, 0, 0);
-    for (int i = 1; i <= 30; i++) {
-        wchar_t p[16];
-        wsprintfW(p, L"COM%d", i);
-        SendMessageW(g_hPort, CB_ADDSTRING, 0, (LPARAM)p);
+static void ClearDeviceList(void) {
+    g_devCount = 0;
+    g_selectedTargetValid = 0;
+    if (g_hDevices) {
+        ListView_DeleteAllItems(g_hDevices);
     }
-    SendMessageW(g_hPort, CB_SETCURSEL, 0, 0);
+}
+
+static int ComPortNumFromName(const wchar_t *name) {
+    const wchar_t *p = name;
+    if (!p || !p[0]) return -1;
+    if ((p[0] == L'C' || p[0] == L'c') &&
+        (p[1] == L'O' || p[1] == L'o') &&
+        (p[2] == L'M' || p[2] == L'm')) {
+        p += 3;
+    }
+    wchar_t *end = NULL;
+    long n = wcstol(p, &end, 10);
+    if (!end || end == p || n < 0 || n > 9999) return -1;
+    return (int)n;
+}
+
+static void RefreshPorts(void) {
+    typedef struct {
+        wchar_t name[32];
+        int num;
+    } ComPortEntry;
+
+    ComPortEntry ports[256];
+    int count = 0;
+
+    SendMessageW(g_hPort, CB_RESETCONTENT, 0, 0);
+
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DEVICEMAP\\SERIALCOMM",
+                      0, KEY_READ | KEY_WOW64_64KEY, &hKey) != ERROR_SUCCESS) {
+        RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DEVICEMAP\\SERIALCOMM",
+                      0, KEY_READ, &hKey);
+    }
+    if (hKey) {
+        DWORD index = 0;
+        wchar_t valueName[256];
+        wchar_t portName[32];
+        DWORD valueNameLen, portNameBytes, type;
+        while (count < 256) {
+            valueNameLen = (DWORD)(sizeof(valueName) / sizeof(valueName[0]));
+            portNameBytes = sizeof(portName);
+            if (RegEnumValueW(hKey, index++, valueName, &valueNameLen,
+                              NULL, &type, (LPBYTE)portName, &portNameBytes) != ERROR_SUCCESS) {
+                break;
+            }
+            int num = ComPortNumFromName(portName);
+            if (num < 0) continue;
+            wcsncpy(ports[count].name, portName, 31);
+            ports[count].name[31] = L'\0';
+            ports[count].num = num;
+            count++;
+        }
+        RegCloseKey(hKey);
+    }
+
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = i + 1; j < count; j++) {
+            if (ports[j].num < ports[i].num) {
+                ComPortEntry tmp = ports[i];
+                ports[i] = ports[j];
+                ports[j] = tmp;
+            }
+        }
+    }
+
+    for (int i = 0; i < count; i++) {
+        SendMessageW(g_hPort, CB_ADDSTRING, 0, (LPARAM)ports[i].name);
+    }
+    if (count > 0) {
+        SendMessageW(g_hPort, CB_SETCURSEL, 0, 0);
+    }
 }
 
 static void SetConnectedUi(int connected) {
@@ -214,7 +309,8 @@ static DWORD WINAPI ReaderThreadProc(LPVOID arg) {
 
     while (!InterlockedCompareExchange(&g_readerStop, 0, 0)) {
         if (!ReadFile(g_hSerial, rxbuf, sizeof(rxbuf), &rd, NULL) || rd == 0) {
-            Sleep(1);
+            /* Во время обновления опрашиваем COM без паузы — ACK не должны залипать в буфере. */
+            Sleep(InterlockedCompareExchange(&g_updateRunning, 0, 0) ? 0 : 1);
             continue;
         }
         for (DWORD i = 0; i < rd; i++) {
@@ -301,6 +397,7 @@ static int ConnectSerial(void) {
     if (!g_hReaderThread) return 0;
     SetThreadPriority(g_hReaderThread, THREAD_PRIORITY_ABOVE_NORMAL);
     InterlockedExchange(&g_connected, 1);
+    ClearDeviceList();
     return 1;
 }
 
@@ -568,22 +665,148 @@ static void SelectUpdateTarget(void) {
     }
 }
 
-static int WaitAckWord(uint32_t timeout_ms) {
+static uint32_t ReadFirmwareWord(const uint8_t *fw_buf, long fw_sz, uint32_t word_idx) {
+    uint8_t b0 = 0xFF, b1 = 0xFF, b2 = 0xFF, b3 = 0xFF;
+    uint32_t off = word_idx * 4u;
+    if (off + 0 < (uint32_t)fw_sz) b0 = fw_buf[off + 0];
+    if (off + 1 < (uint32_t)fw_sz) b1 = fw_buf[off + 1];
+    if (off + 2 < (uint32_t)fw_sz) b2 = fw_buf[off + 2];
+    if (off + 3 < (uint32_t)fw_sz) b3 = fw_buf[off + 3];
+    return ((uint32_t)b3 << 24) | ((uint32_t)b2 << 16) | ((uint32_t)b1 << 8) | b0;
+}
+
+static void BuildUpdateWordData(uint8_t d[8], uint32_t word_idx, uint32_t word) {
+    d[0] = (uint8_t)CMD_SET_UPDATE_WORD;
+    d[1] = (uint8_t)((word_idx >> 16) & 0xFF);
+    d[2] = (uint8_t)((word_idx >> 8) & 0xFF);
+    d[3] = (uint8_t)(word_idx & 0xFF);
+    d[4] = (uint8_t)((word >> 24) & 0xFF);
+    d[5] = (uint8_t)((word >> 16) & 0xFF);
+    d[6] = (uint8_t)((word >> 8) & 0xFF);
+    d[7] = (uint8_t)(word & 0xFF);
+}
+
+static void AckBatchBeginLocked(uint32_t batch_start, uint32_t batch_len, const uint32_t *words) {
+    g_ack.active = 1;
+    g_ack.batch_start = batch_start;
+    g_ack.batch_len = batch_len;
+    g_ack.acked_count = 0;
+    memset(g_ack.acked, 0, batch_len);
+    for (uint32_t j = 0; j < batch_len; j++) {
+        g_ack.expect_idx[j] = batch_start + j;
+        g_ack.expect_word[j] = words[j];
+    }
+}
+
+static uint32_t AckTimeoutForWord(uint32_t word_idx) {
+    if (word_idx == 0u) return ACK_WAIT_MS_FIRST_WORD;
+    /* Слова 3,7,11… завершают quad и программируют flash — ACK приходит дольше. */
+    if ((word_idx & 3u) == 3u) return ACK_WAIT_MS_QUAD_FLUSH;
+    return ACK_WAIT_MS_NORMAL;
+}
+
+static int WaitAckSlot(uint32_t slot, uint32_t timeout_ms) {
     DWORD start = GetTickCount();
     int ok = 0;
     EnterCriticalSection(&g_ackCs);
-    while (!g_ack.matched && (GetTickCount() - start < timeout_ms)) {
+    while (!g_ack.acked[slot] &&
+           (GetTickCount() - start) < timeout_ms &&
+           !InterlockedCompareExchange(&g_updateStop, 0, 0)) {
         SleepConditionVariableCS(&g_ackCv, &g_ackCs, 2);
     }
-    ok = g_ack.matched;
+    ok = g_ack.acked[slot] ? 1 : 0;
     LeaveCriticalSection(&g_ackCs);
     return ok;
+}
+
+static int RunVerifyBatch(uint32_t can_id, uint32_t batch_start, uint32_t batch_len,
+                          const uint32_t *batch_words) {
+    EnterCriticalSection(&g_ackCs);
+    AckBatchBeginLocked(batch_start, batch_len, batch_words);
+    LeaveCriticalSection(&g_ackCs);
+
+    /* Внутри пачки: отправили слово → дождались ACK → следующее.
+     * Иначе мост/UART и МКУ не успевают на словах 2–3 и на quad-flush (3,7,11…). */
+    uint8_t payload[8];
+    for (uint32_t j = 0; j < batch_len; j++) {
+        uint32_t wi = batch_start + j;
+        uint32_t tmo = AckTimeoutForWord(wi);
+        int max_retries = (wi == 0u) ? ACK_RETRY_FIRST_WORD : ACK_RETRY_NORMAL;
+        int word_ok = 0;
+
+        for (int attempt = 0; attempt < max_retries && !word_ok; attempt++) {
+            if (InterlockedCompareExchange(&g_updateStop, 0, 0)) goto fail;
+
+            EnterCriticalSection(&g_ackCs);
+            if (g_ack.acked[j]) {
+                word_ok = 1;
+                LeaveCriticalSection(&g_ackCs);
+                break;
+            }
+            LeaveCriticalSection(&g_ackCs);
+
+            BuildUpdateWordData(payload, wi, batch_words[j]);
+            if (!SendBsuCanPacket(can_id, payload, BSU_PKT_TYPE_CAN1)) {
+                goto fail;
+            }
+            if (WaitAckSlot(j, tmo)) {
+                word_ok = 1;
+            }
+        }
+
+        if (!word_ok) {
+            Logf(L"Нет подтверждения для слова %u\r\n", wi);
+            goto fail;
+        }
+    }
+
+    EnterCriticalSection(&g_ackCs);
+    g_ack.active = 0;
+    LeaveCriticalSection(&g_ackCs);
+    return 1;
+
+fail:
+    EnterCriticalSection(&g_ackCs);
+    g_ack.active = 0;
+    LeaveCriticalSection(&g_ackCs);
+    return 0;
 }
 
 typedef struct {
     DeviceInfo dev;
     wchar_t file_path[MAX_PATH];
+    int verify_packets;
+    uint32_t batch_size;
 } UpdaterArgs;
+
+static uint32_t ReadBatchSizeFromUi(void) {
+    wchar_t wbuf[32];
+    wbuf[0] = L'\0';
+    if (g_hBatch) GetWindowTextW(g_hBatch, wbuf, 31);
+    long v = wcstol(wbuf, NULL, 10);
+    if (v < (long)MIN_BATCH_SIZE) v = (long)MIN_BATCH_SIZE;
+    if (v > (long)MAX_BATCH_SIZE) v = (long)MAX_BATCH_SIZE;
+    return (uint32_t)v;
+}
+
+static void SetBatchUiEnabled(int enabled) {
+    if (g_hBatch) EnableWindow(g_hBatch, enabled);
+}
+
+static int UpdaterAllocFailedCleanup(uint8_t *fw_buf, uint8_t *batch_buf, uint32_t *batch_words,
+                                     UpdaterArgs *ua) {
+    if (fw_buf) free(fw_buf);
+    if (batch_buf) free(batch_buf);
+    if (batch_words) free(batch_words);
+    timeEndPeriod(1);
+    EnterCriticalSection(&g_ackCs);
+    g_ack.active = 0;
+    LeaveCriticalSection(&g_ackCs);
+    free(ua);
+    InterlockedExchange(&g_updateRunning, 0);
+    PostMessageW(g_hwnd, WM_APP_UPD_DONE, 0, 0);
+    return 0;
+}
 
 static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
     UpdaterArgs *ua = (UpdaterArgs *)arg;
@@ -614,45 +837,65 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
 
     uint32_t total_words = ((uint32_t)fsz + 3u) / 4u;
     uint32_t can_id_req = BuildCanId(ua->dev.d_type, ua->dev.h_adr, ua->dev.l_adr, ua->dev.zone, 0);
+    timeBeginPeriod(1);
     SendMessageW(g_hProgress, PBM_SETRANGE32, 0, total_words);
     SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
-    Logf(L"Старт обновления: words=%u\r\n", total_words);
-    uint32_t last_progress = 0;
+    if (ua->verify_packets) {
+        Logf(L"Старт обновления: words=%u, верификация=вкл, пачка=%u\r\n",
+             total_words, ua->batch_size);
+    } else {
+        Logf(L"Старт обновления: words=%u, верификация=выкл, пачка=%u\r\n",
+             total_words, ua->batch_size);
+    }
 
-    for (uint32_t i = 0; i < total_words; i++) {
+    size_t batch_cap = (size_t)ua->batch_size * BSU_PKT_SIZE_CAN;
+    uint8_t *batch_buf = (uint8_t *)malloc(batch_cap);
+    uint32_t *batch_words = (uint32_t *)malloc((size_t)ua->batch_size * sizeof(uint32_t));
+    if (!batch_buf || !batch_words) {
+        Logf(L"Ошибка выделения буфера пачки.\r\n");
+        return UpdaterAllocFailedCleanup(buf, batch_buf, batch_words, ua);
+    }
+
+    for (uint32_t batch_start = 0; batch_start < total_words; ) {
         if (InterlockedCompareExchange(&g_updateStop, 0, 0)) {
             Logf(L"Обновление остановлено пользователем.\r\n");
             break;
         }
-        uint8_t b0 = 0xFF, b1 = 0xFF, b2 = 0xFF, b3 = 0xFF;
-        uint32_t off = i * 4u;
-        if (off + 0 < (uint32_t)fsz) b0 = buf[off + 0];
-        if (off + 1 < (uint32_t)fsz) b1 = buf[off + 1];
-        if (off + 2 < (uint32_t)fsz) b2 = buf[off + 2];
-        if (off + 3 < (uint32_t)fsz) b3 = buf[off + 3];
-        uint32_t word = ((uint32_t)b3 << 24) | ((uint32_t)b2 << 16) | ((uint32_t)b1 << 8) | b0;
 
-        uint8_t d[8] = {0};
-        d[0] = CMD_SET_UPDATE_WORD;
-        d[1] = (uint8_t)((i >> 16) & 0xFF);
-        d[2] = (uint8_t)((i >> 8) & 0xFF);
-        d[3] = (uint8_t)(i & 0xFF);
-        d[4] = (uint8_t)((word >> 24) & 0xFF);
-        d[5] = (uint8_t)((word >> 16) & 0xFF);
-        d[6] = (uint8_t)((word >> 8) & 0xFF);
-        d[7] = (uint8_t)(word & 0xFF);
+        uint32_t batch_len = ua->batch_size;
+        if (batch_start + batch_len > total_words) {
+            batch_len = total_words - batch_start;
+        }
 
-        /* Режим без подтверждений: отправляем слово и идём дальше. */
-        if (!SendBsuCanPacket(can_id_req, d, BSU_PKT_TYPE_CAN1)) {
-            Logf(L"Ошибка отправки слова %u\r\n", i);
-            break;
+        for (uint32_t j = 0; j < batch_len; j++) {
+            batch_words[j] = ReadFirmwareWord(buf, fsz, batch_start + j);
         }
-        if (((i + 1u) - last_progress) >= 64u || (i + 1u) == total_words) {
-            /* Не дёргаем UI на каждом слове: это заметно тормозит цикл передачи. */
-            PostMessageW(g_hProgress, PBM_SETPOS, i + 1, 0);
-            last_progress = i + 1u;
+
+        uint8_t payload[8];
+        for (uint32_t j = 0; j < batch_len; j++) {
+            BuildUpdateWordData(payload, batch_start + j, batch_words[j]);
+            BuildBsuCanPacket(&batch_buf[j * BSU_PKT_SIZE_CAN], can_id_req, payload, BSU_PKT_TYPE_CAN1);
         }
-        Sleep(1);
+
+        int batch_ok = 0;
+        if (ua->verify_packets) {
+            batch_ok = RunVerifyBatch(can_id_req, batch_start, batch_len, batch_words);
+        } else {
+            if (SerialWrite(batch_buf, (DWORD)(batch_len * BSU_PKT_SIZE_CAN))) {
+                batch_ok = 1;
+                if (batch_start + batch_len < total_words) {
+                    Sleep(BATCH_SLEEP_MS);
+                }
+            } else {
+                Logf(L"Ошибка отправки пачки (слова %u-%u)\r\n",
+                     batch_start, batch_start + batch_len - 1u);
+            }
+        }
+
+        if (!batch_ok) break;
+
+        batch_start += batch_len;
+        PostMessageW(g_hProgress, PBM_SETPOS, batch_start, 0);
     }
 
     if (!InterlockedCompareExchange(&g_updateStop, 0, 0)) {
@@ -662,6 +905,12 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
     }
 
     free(buf);
+    free(batch_buf);
+    free(batch_words);
+    timeEndPeriod(1);
+    EnterCriticalSection(&g_ackCs);
+    g_ack.active = 0;
+    LeaveCriticalSection(&g_ackCs);
     free(ua);
     InterlockedExchange(&g_updateRunning, 0);
     PostMessageW(g_hwnd, WM_APP_UPD_DONE, 0, 0);
@@ -689,10 +938,14 @@ static void StartUpdate(void) {
     g_activeUpdateDev = ua->dev;
     g_activeUpdateDevValid = 1;
     wcsncpy(ua->file_path, path, MAX_PATH - 1);
+    ua->verify_packets = (g_hVerify && SendMessageW(g_hVerify, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    ua->batch_size = ReadBatchSizeFromUi();
     InterlockedExchange(&g_updateStop, 0);
     InterlockedExchange(&g_updateRunning, 1);
     EnableWindow(g_hStart, FALSE);
     EnableWindow(g_hStop, TRUE);
+    if (g_hVerify) EnableWindow(g_hVerify, FALSE);
+    SetBatchUiEnabled(FALSE);
     g_hUpdaterThread = CreateThread(NULL, 0, UpdaterThreadProc, ua, 0, NULL);
 }
 
@@ -750,6 +1003,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_hStart = CreateWindowW(L"BUTTON", L"Старт обновления", WS_CHILD | WS_VISIBLE, 10, 264, 150, 28, hwnd, (HMENU)IDC_BTN_START, NULL, NULL);
             g_hStop = CreateWindowW(L"BUTTON", L"Принудительно завершить", WS_CHILD | WS_VISIBLE, 170, 264, 180, 28, hwnd, (HMENU)IDC_BTN_STOP, NULL, NULL);
             EnableWindow(g_hStop, FALSE);
+            g_hVerify = CreateWindowW(L"BUTTON", L"Верификация (ACK)",
+                                      WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                      360, 264, 150, 28, hwnd, (HMENU)IDC_CHK_VERIFY, NULL, NULL);
+            SendMessageW(g_hVerify, BM_SETCHECK, BST_CHECKED, 0);
+            CreateWindowW(L"STATIC", L"Пачка:",
+                          WS_CHILD | WS_VISIBLE, 520, 268, 50, 20, hwnd, NULL, NULL, NULL);
+            g_hBatch = CreateWindowW(L"EDIT", L"8",
+                                     WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_CENTER,
+                                     570, 264, 50, 24, hwnd, (HMENU)IDC_EDIT_BATCH, NULL, NULL);
 
             g_hProgress = CreateWindowW(PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE, 10, 298, w - 20, 20, hwnd, (HMENU)IDC_PROGRESS, NULL, NULL);
             g_hLog = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
@@ -776,7 +1038,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     if (!InterlockedCompareExchange(&g_connected, 0, 0)) {
                         if (ConnectSerial()) {
                             SetConnectedUi(1);
-                            Logf(L"Подключено.\r\n");
+                            Logf(L"Подключено. Список устройств очищен.\r\n");
                         } else {
                             MessageBoxW(hwnd, L"Ошибка подключения к COM.", L"Updater", MB_ICONERROR);
                         }
@@ -850,6 +1112,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             EnableWindow(g_hStart, TRUE);
             EnableWindow(g_hStop, FALSE);
+            if (g_hVerify) EnableWindow(g_hVerify, TRUE);
+            SetBatchUiEnabled(TRUE);
             /* После update_transmit МКУ перезагружается, и версия могла измениться:
              * сбрасываем кэш и инициируем повторный опрос целевого МКУ. */
             if (g_activeUpdateDevValid) {
