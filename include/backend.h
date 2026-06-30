@@ -92,6 +92,9 @@ enum ServiceCmd {
 
 	ServiceCmd_DefaultConfig	 	= 162,
 
+	/* Виртуальная кнопка → ППКУ: эквивалент нажатия «ПУСК СП» (broadcast, без параметров). */
+	ServiceCmd_Fire_StartSpButton	= 163,
+
 	ServiceCmd_CircSetAdr 		= 200,
 };
 
@@ -148,6 +151,7 @@ void SetReplyResumeExtinguishmentTimer(uint8_t dev);
 void RcvStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
 void RcvReplyStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
 void RcvStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
+void RcvStartSpButton(uint32_t MsgID, uint8_t *MsgData, uint8_t is_our_cmd);
 void RcvReplyStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
 void RcvStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);
 void RcvReplyStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_our_cmd);

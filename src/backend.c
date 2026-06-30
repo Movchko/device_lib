@@ -48,6 +48,7 @@ uint8_t GetRetranslate() {
 __attribute__((weak)) void RcvStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvReplyStatusFire(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
+__attribute__((weak)) void RcvStartSpButton(uint32_t MsgID, uint8_t *MsgData, uint8_t is_mine) { (void)MsgID; (void)MsgData; (void)is_mine; }
 __attribute__((weak)) void RcvReplyStartExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
 __attribute__((weak)) void RcvReplyStopExtinguishment(uint32_t MsgID,  uint8_t *MsgData, uint8_t is_mine) {  (void)0; }
@@ -172,6 +173,8 @@ void BackendProcess() {
 
 uint8_t isFireCMD(uint8_t command) {
 	if(command >= ServiceCmd_Fire_SetStatusFire && command < ServiceCmd_GetConfigSize)
+		return 1;
+	if (command == ServiceCmd_Fire_StartSpButton)
 		return 1;
 
 	return 0;
@@ -394,6 +397,9 @@ void FireServiceCmd(uint32_t MsgID, uint8_t Command, uint8_t *MsgData, uint8_t b
 		}break;
 		case ServiceCmd_Fire_StartExtinguishment: {
 			RcvStartExtinguishment(MsgID, MsgData, is_our_cmd);
+		}break;
+		case ServiceCmd_Fire_StartSpButton: {
+			RcvStartSpButton(MsgID, MsgData, is_our_cmd);
 		}break;
 		case ServiceCmd_Fire_StopExtinguishment: {
 			RcvStopExtinguishment(MsgID, MsgData, is_our_cmd);

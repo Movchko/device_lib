@@ -42,6 +42,24 @@ static void VDeviceButton_SendStartExtinguishment(uint8_t zone,
 	VDeviceButton_OnStartExtinguishment(zone, zone_delay_s, module_delay_s, launch_type);
 }
 
+static void VDeviceButton_SendStartSpButton(void)
+{
+	can_ext_id_t can_id;
+	uint8_t data[8] = {
+		ServiceCmd_Fire_StartSpButton,
+		0u, 0u, 0u, 0u, 0u, 0u, 0u
+	};
+
+	can_id.ID = 0u;
+	can_id.field.dir = 0u;
+	can_id.field.d_type = 0u;
+	can_id.field.h_adr = 0u;
+	can_id.field.l_adr = 0u;
+	can_id.field.zone = 0u;
+
+	SendMessageFull(can_id, data, SEND_NOW, BUS_CAN12);
+}
+
 VDeviceButton::VDeviceButton(uint8_t ChNum)
 	: VDeviceDPT(ChNum),
 	  ButtonCfg(nullptr),
@@ -90,7 +108,8 @@ void VDeviceButton::Init() {
 void VDeviceButton::OnPressEdge(void) {
 	switch (ButtonKind) {
 	case DeviceButtonKind_StartSP:
-		VDeviceButton_SendStartSP();
+		/* ПУСК СП на ППКУ: broadcast ServiceCmd_Fire_StartSpButton (163). */
+		VDeviceButton_SendStartSpButton();
 		break;
 
 	case DeviceButtonKind_StartAll:
