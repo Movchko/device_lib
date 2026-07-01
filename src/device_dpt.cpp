@@ -205,17 +205,21 @@ void VDeviceDPT::Timer1ms() {
 
     /* Окно стабилизации после пробного включения 24В */
     if (probeAfterShort) {
-        const uint16_t PROBE_SETTLE_MS = 500;
-        if (probeTimerMs < PROBE_SETTLE_MS) {
+        const uint16_t PROBE_MAX_MS = 500;
+        const uint8_t recovered = (prevLineState != DeviceDPTLineState_Short) ? 1u : 0u;
+        if (!recovered && probeTimerMs < PROBE_MAX_MS) {
             probeTimerMs++;
-            /* В течение окна 500 мс не переключаемся обратно на MAX,
-             * даём АЦП/фильтру увидеть, что КЗ ушёл.
-             */
+            /* Даём АЦП/фильтру увидеть, что КЗ ушло; не возвращаемся в MAX раньше времени. */
             return;
-        } else {
-            probeAfterShort = 0;
-            probeTimerMs = 0;
         }
+        if (recovered) {
+            /* Устойчивый выход из КЗ (Норма, Обрыв и т.д.) — остаёмся в режиме сопротивления. */
+            measureModeIsMax = 0;
+            maxRetryTimerMs = 0;
+            maxSettleMs = 0;
+        }
+        probeAfterShort = 0;
+        probeTimerMs = 0;
     }
 
     /* Логика работы с КЗ и MAX */
@@ -252,8 +256,10 @@ void VDeviceDPT::Timer1ms() {
     } else {
         /* 2. MAX используется (useMax=1) */
 
-        /* Переход в режим MAX при устойчивом КЗ (только вне окна пробы) */
-        if (!measureModeIsMax && !probeAfterShort && prevLineState == DeviceDPTLineState_Short) {
+        /* Переход в режим MAX при устойчивом КЗ (только вне окна пробы).
+         * Не входим в MAX, пока фильтр ещё переводит линию из КЗ в другое состояние. */
+        if (!measureModeIsMax && !probeAfterShort && prevLineState == DeviceDPTLineState_Short &&
+            !(pendingLineState != DeviceDPTLineState_Short && pendingTimeMs > 0)) {
             measureModeIsMax = 1;
             maxRetryTimerMs = 0;
             maxSettleMs = 0;
@@ -388,6 +394,16 @@ void VDeviceDPT::UpdateLineStateFiltered() {
 			if (pendingTimeMs >= state_change_delay_ms) {
 				prevLineState = candidate;
 				LineState = candidate;
+				if (useMax && measureModeIsMax && candidate != DeviceDPTLineState_Short) {
+					measureModeIsMax = 0;
+					maxRetryTimerMs = 0;
+					maxSettleMs = 0;
+					probeAfterShort = 0;
+					probeTimerMs = 0;
+					if (DPT_SetResMeasureMode) {
+						DPT_SetResMeasureMode();
+					}
+				}
 				SetStatus();
 			}
 		}

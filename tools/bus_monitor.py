@@ -590,11 +590,15 @@ def run_read_config(ser, bsu: BSUParser, h_adr: int | None, l_adr: int = 0, zone
 
 
 # --- Смещения PPKYCfg / MKUCfg (device_lib/include/device_config.h, ARM GCC) ---
-CFG_BASE = 72  # sizeof(UniqId) + beep..isBRP + reserv[32] до CfgDevices[0]
+CFG_BASE = 76  # UniqId(32) + beep..was_fire + pad + baudrates + reserv[23] до CfgDevices[0]
+PPKY_WAS_FIRE_OFF = 40
+PPKY_EX_CAN_BAUD_OFF = 44
+PPKY_EX_RS485_BAUD_OFF = 48
 ZONE_NUMBER_CFG = 100
 ZONE_NAME_SIZE_CFG = 64
 ZONE_NAME_AREA_CFG = ZONE_NUMBER_CFG * ZONE_NAME_SIZE_CFG  # 6400
 FIRE_AND_BYTES_CFG = ZONE_NUMBER_CFG  # uint8_t fire_and[ZONE_NUMBER]
+PPKY_TAIL_BYTES_CFG = 2  # beep_block + wifi_block после fire_and[]
 NUM_DEV_IN_MCU_CFG = 32
 MKU_UID_BYTES = 32
 MKU_VDTYPE_BYTES = NUM_DEV_IN_MCU_CFG * 4  # 128
@@ -608,8 +612,11 @@ MKU_STRIDE_BYTES = MKU_DEVICES0_OFF + NUM_DEV_IN_MCU_CFG * 64 + 64  # 2404 = siz
 MKU_TOTAL_WORDS = MKU_STRIDE_BYTES // 4  # 601 слов на один MKUCfg
 MKU_POST_UID_WORDS = (MKU_STRIDE_BYTES - MKU_UID_BYTES) // 4  # 593 слова после UId
 
-# Минимальный размер PPKYCfg по device_config.h (чтобы fire_and всегда помещался в буфер и читался по словам)
-MIN_PPKY_CFG_BYTES = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES + ZONE_NAME_AREA_CFG + FIRE_AND_BYTES_CFG
+# Минимальный размер PPKYCfg по device_config.h (чтобы хвост fire_and/beep_block помещался в буфер)
+MIN_PPKY_CFG_BYTES = (
+    CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES + ZONE_NAME_AREA_CFG
+    + FIRE_AND_BYTES_CFG + PPKY_TAIL_BYTES_CFG
+)
 
 
 def read_config_bytes(
@@ -898,12 +905,13 @@ def read_config_bytes(
         if all_zero:
             break
 
-    # --- 5. fire_and[ZONE_NUMBER] (после имён зон) ---
+    # --- 5. fire_and[ZONE_NUMBER], beep_block, wifi_block (хвост PPKYCfg) ---
     fire_off = zone_name_offset + ZONE_NAME_AREA
-    fire_words = (FIRE_AND_BYTES_CFG + 3) // 4
-    if fire_off + FIRE_AND_BYTES_CFG <= size_bytes:
+    tail_bytes = FIRE_AND_BYTES_CFG + PPKY_TAIL_BYTES_CFG
+    tail_words = (tail_bytes + 3) // 4
+    if fire_off + tail_bytes <= size_bytes:
         fire_idx0 = fire_off // 4
-        for w_i in range(fire_words):
+        for w_i in range(tail_words):
             idx = fire_idx0 + w_i
             if idx >= num_words:
                 break
@@ -956,6 +964,21 @@ def _u32_le_buf(b: bytes, off: int) -> int:
     return struct.unpack_from("<I", b, off)[0]
 
 
+def _button_kind_name(kind: int) -> str:
+    names = ("ПУСК СП", "пуск всех зон", "пуск по списку зон")
+    return names[kind] if 0 <= kind < len(names) else str(kind)
+
+
+def _lswitch_function_name(func: int) -> str:
+    names = {
+        1: "неисправность",
+        2: "ручной ППКУ",
+        3: "авто ППКУ",
+        4: "пауза пуска",
+    }
+    return names.get(func, str(func))
+
+
 def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
     """Краткое описание Device*Config внутри VDeviceCfg::reserv (64 байта, LE)."""
     if len(reserv) < 8:
@@ -983,12 +1006,18 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
             f"init={reserv[0]} persist={reserv[1]} inv_ОС={reserv[2]} "
             f"задержка_перекл={reserv[3]}с ожид_ОС={settle}мс mode={mode}({mode_s}) saved={saved}"
         )
-    elif vd_type == 15:  # DeviceButtonConfig
-        kind = reserv[0]
-        zones = list(reserv[1:8])
-        parts.append(f"button_kind={kind} zones={zones}")
+    elif vd_type == 15:  # DeviceButtonConfig (голова DPT + button_kind/zones/NC)
+        dms = _u16_le_buf(reserv, 4)
+        kind = reserv[6] if len(reserv) > 6 else 0
+        zones = list(reserv[7:14]) if len(reserv) >= 14 else []
+        nc = reserv[14] if len(reserv) > 14 else 0
+        zones_nz = [z for z in zones if z != 0]
+        zones_s = ",".join(str(z) for z in zones_nz) if zones_nz else "—"
+        parts.append(
+            f"kind={kind}({_button_kind_name(kind)}) зоны=[{zones_s}] "
+            f"{'NC' if nc else 'NO'} стаб={dms}мс"
+        )
     elif vd_type == 16:  # DeviceLimitSwitchConfig
-        mode = reserv[0]
         use_max = reserv[1]
         th = _u16_le_buf(reserv, 2)
         dms = _u16_le_buf(reserv, 4)
@@ -996,8 +1025,9 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
         func = reserv[7]
         nc = reserv[8]
         parts.append(
-            f"режим={mode} MAX={'да' if use_max else 'нет'} T={th}°C стаб={dms}мс "
-            f"trig={trig}s func={func} NC={nc}"
+            f"MAX={'да' if use_max else 'нет'} T={th}°C стаб={dms}мс "
+            f"trig={trig}с func={func}({_lswitch_function_name(func)}) "
+            f"{'NC' if nc else 'NO'}"
         )
     elif vd_type != 0 and any(reserv[:16]):
         hx = reserv[:8].hex()
@@ -1008,22 +1038,23 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
 def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
     """
     Парсит PPKYCfg (device_config.h) и возвращает список строк с полями.
-    PPKYCfg: UniqId(32), beep, fire_mode, power_*, rs485/ex_can, isBRP, reserv[32],
-    CfgDevices[32]×MKUCfg, zone_name[100][64], fire_and[100].
+    PPKYCfg: UniqId(32), beep..was_fire, baudrates, reserv[23], CfgDevices[32]×MKUCfg,
+    zone_name[100][64], fire_and[100], beep_block, wifi_block.
     MKUCfg: UId, VDtype[32], zone_delay, module_delay[32], Devices[32]×64, reserv[64].
     """
     lines: list[str] = []
     zone_name_offset = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES
-    min_full = zone_name_offset + ZONE_NAME_AREA_CFG + FIRE_AND_BYTES_CFG
+    fire_and_offset = zone_name_offset + ZONE_NAME_AREA_CFG
+    min_full = fire_and_offset + FIRE_AND_BYTES_CFG + PPKY_TAIL_BYTES_CFG
 
     if debug_dump:
         lines.append("--- Дамп байт 0..255 (отладка) ---")
         lines.extend(dump_config_hex(cfg, 256))
-        tail = len(cfg) - CFG_BASE - ZONE_NAME_AREA_CFG - FIRE_AND_BYTES_CFG
+        tail = len(cfg) - fire_and_offset - FIRE_AND_BYTES_CFG - PPKY_TAIL_BYTES_CFG
         mku_guess = tail // NUM_DEV_IN_MCU_CFG if tail > 0 else 0
         lines.append(
-            f"--- size={len(cfg)} min_full≈{min_full} MKU_stride={MKU_STRIDE_BYTES} "
-            f"tail_for_mkus={tail} → tail/32={mku_guess} zone_off={zone_name_offset} ---"
+            f"--- size={len(cfg)} min_full≈{min_full} CFG_BASE={CFG_BASE} MKU_stride={MKU_STRIDE_BYTES} "
+            f"zone_off={zone_name_offset} fire_and_off={fire_and_offset} ---"
         )
         if len(cfg) >= CFG_BASE + 24:
             off0 = CFG_BASE
@@ -1055,12 +1086,22 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
     ex_can_on = cfg[37]
     ex_can_protocol = cfg[38]
     is_brp = cfg[39]
+    was_fire = cfg[PPKY_WAS_FIRE_OFF] if len(cfg) > PPKY_WAS_FIRE_OFF else 0
+    ex_can_baud = _u32_le_buf(cfg, PPKY_EX_CAN_BAUD_OFF) if len(cfg) >= PPKY_EX_CAN_BAUD_OFF + 4 else 0
+    ex_rs485_baud = _u32_le_buf(cfg, PPKY_EX_RS485_BAUD_OFF) if len(cfg) >= PPKY_EX_RS485_BAUD_OFF + 4 else 0
     fm = ("авто", "автоном", "ручной")
     fm_s = fm[fire_mode] if fire_mode < len(fm) else str(fire_mode)
+    can_proto = ("J1939", "J1979")
+    can_proto_s = can_proto[ex_can_protocol] if ex_can_protocol < len(can_proto) else str(ex_can_protocol)
     lines.append(
         f"beep={beep} fire_mode={fire_mode}({fm_s}) power: вводов={power_input} U={power_value}В "
-        f"rs485={rs485_on} ex_can={ex_can_on} протокол_can={ex_can_protocol} isBRP={is_brp}"
+        f"rs485={rs485_on} ex_can={ex_can_on} протокол_can={ex_can_protocol}({can_proto_s}) "
+        f"isBRP={is_brp} was_fire={was_fire}"
     )
+    if ex_can_on or ex_can_baud:
+        lines.append(f"ex_can_baudrate={ex_can_baud}")
+    if rs485_on or ex_rs485_baud:
+        lines.append(f"ex_rs485_baudrate={ex_rs485_baud}")
 
     for i in range(NUM_DEV_IN_MCU_CFG):
         off = CFG_BASE + i * MKU_STRIDE_BYTES
@@ -1082,7 +1123,7 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
             if vd_type_j == 0:
                 continue
             md_j = _u32_le_buf(cfg, off + MKU_MODULE_DELAY_OFF + j * 4)
-            mod_delays.append(f"{md_j}с")
+            mod_delays.append(f"сл.{j}:{md_j}с")
         md_part = f" module_delay={','.join(mod_delays)}" if mod_delays else ""
         lines.append(
             f"CfgDevices[{i}]: {d_name} h={h_adr} l={l_adr} z={zone} zone_delay={zd}с{md_part}"
@@ -1110,17 +1151,10 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
             break
         lines.append(f"zone_name[{z}]: {name!r}")
 
-    # fire_and[ZONE_NUMBER] (байт 83400 = fire_and[0] при sizeof(MKUCfg)=2404)
-    fire_off = zone_name_offset + ZONE_NAME_AREA_CFG
+    # fire_and[ZONE_NUMBER] + beep_block + wifi_block
+    fire_off = fire_and_offset
     if fire_off + FIRE_AND_BYTES_CFG <= len(cfg):
         fire_and = cfg[fire_off : fire_off + FIRE_AND_BYTES_CFG]
-        lines.append(f"fire_and[0]={fire_and[0]} (offset={fire_off}, word#{fire_off // 4})")
-        if len(cfg) >= fire_off + 4:
-            w208 = struct.unpack_from(">I", cfg, fire_off)[0]
-            lines.append(
-                f"fire_and сырьё: слово#{(fire_off // 4)} BE=0x{w208:08X}, "
-                f"байты[0..3]={cfg[fire_off : fire_off + 4].hex()}"
-            )
         and_zones = [str(zi) for zi, v in enumerate(fire_and) if v != 0]
         if and_zones:
             preview = ", ".join(and_zones[:40])
@@ -1128,6 +1162,20 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
             lines.append(f"fire_and (режим «И», ненулевые зоны): {preview}{more}")
         else:
             lines.append("fire_and: ни одна зона не в режиме «И» (везде «ИЛИ»)")
+        if debug_dump:
+            lines.append(f"fire_and[0]={fire_and[0]} (offset={fire_off}, word#{fire_off // 4})")
+            if len(cfg) >= fire_off + 4:
+                w208 = struct.unpack_from(">I", cfg, fire_off)[0]
+                lines.append(
+                    f"fire_and сырьё: слово#{(fire_off // 4)} BE=0x{w208:08X}, "
+                    f"байты[0..3]={cfg[fire_off : fire_off + 4].hex()}"
+                )
+
+    tail_off = fire_off + FIRE_AND_BYTES_CFG
+    if tail_off + PPKY_TAIL_BYTES_CFG <= len(cfg):
+        beep_block = cfg[tail_off]
+        wifi_block = cfg[tail_off + 1]
+        lines.append(f"beep_block={beep_block} wifi_block={wifi_block}")
 
     return lines
 

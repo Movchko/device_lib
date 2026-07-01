@@ -15,7 +15,7 @@ extern "C" {
 #define ZONE_NAME_SIZE	64 // 64 символа на имя зоны
 #define ZONE_NUMBER		100 // количество зон
 
-#define NUM_DEV_IN_MCU 32
+#define MAX_MCU_IN_BUS 32
 
 // Заголовок области конфигурации во Flash
 #define PPKY_CFG_HEADER_MAGIC 0x50504B59u /* 'P','P','K','Y' */
@@ -54,10 +54,16 @@ typedef struct PPKYCfg {
 	uint8_t ex_can_protocol;  // выбор протокола внешнего can (0 - 1939, 1 - 1979)
 	uint8_t isBRP; // наличие БРП
 
-	uint8_t reserv[32];
+	uint8_t was_fire;
+
+	uint32_t ex_can_baudrate;
+
+	uint32_t ex_rs485_baudrate;
+
+	uint8_t reserv[23]; // было 32
 
 	// выравниваем по 4 байта
-	MKUCfg	CfgDevices[32];
+	MKUCfg	CfgDevices[MAX_MCU_IN_BUS];
 
 	int8_t zone_name[ZONE_NUMBER][ZONE_NAME_SIZE];
 	uint8_t fire_and[ZONE_NUMBER]; // режим или\и (0 - или, 1 - И)
