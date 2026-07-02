@@ -538,18 +538,6 @@ static void UpdateServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 	}
 }
 
-static void VersionServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
-	(void)MsgData;
-	if (Command == ServiceCmd_GetVersion) {
-		uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
-		uint32_t ver = GetAppVersion();
-		Data[0] = (uint8_t)((ver >> 24) & 0xFF);
-		Data[1] = (uint8_t)((ver >> 16) & 0xFF);
-		Data[2] = (uint8_t)((ver >> 8) & 0xFF);
-		Data[3] = (uint8_t)(ver & 0xFF);
-		SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
-	}
-}
 
 void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus, uint8_t dir) {
 
@@ -620,10 +608,41 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 				UpdateServiceCmd(Dev, Command, MsgData);
 		}break;
 		case ServiceCmd_GetVersion: {
+			/* запрос строки версии: N пакетов, в каждом до 6 байт текста */
 			if(dir & (Dev == 0)) // если от нас и нам, то исключаем (кольцо)
 				return;
-			else
-				VersionServiceCmd(Dev, Command, MsgData);
+			else {
+				const char *ver = GetAppVersion();
+				size_t len;
+				size_t pos = 0;
+				uint8_t pkt = 0;
+				uint8_t need_term_pkt = 0;
+
+				if(ver == NULL)
+					ver = "";
+				len = strlen(ver);
+
+				do {
+					uint8_t Data[7];
+					uint8_t i;
+
+					memset(Data, 0, sizeof(Data));
+					Data[0] = pkt++;
+					for(i = 1; i < 7; i++) {
+						if(pos < len)
+							Data[i] = (uint8_t)ver[pos++];
+					}
+					SendMessage(Dev, Command, Data, SEND_NOW, bus);
+
+					if(pos >= len) {
+						if(len == 0 || (len % 6u) != 0u)
+							break;
+						if(need_term_pkt)
+							break;
+						need_term_pkt = 1;
+					}
+				} while(1);
+			}
 		}break;
 
 	}

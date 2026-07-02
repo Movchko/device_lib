@@ -54,13 +54,13 @@ typedef struct PPKYCfg {
 	uint8_t ex_can_protocol;  // выбор протокола внешнего can (0 - 1939, 1 - 1979)
 	uint8_t isBRP; // наличие БРП
 
-	uint8_t was_fire;
+	uint32_t was_fire;
 
 	uint32_t ex_can_baudrate;
 
 	uint32_t ex_rs485_baudrate;
 
-	uint8_t reserv[23]; // было 32
+	uint8_t reserv[20]; // было 32
 
 	// выравниваем по 4 байта
 	MKUCfg	CfgDevices[MAX_MCU_IN_BUS];
@@ -165,7 +165,8 @@ typedef struct DeviceRelayConfig {
 
 	/* Инверсия обратной связи:
 	 * 0 - feedback 1 означает "включено"
-	 * 1 - feedback 0 означает "включено" */
+	 * 1 - feedback 0 означает "включено"
+	 * Запись в рантайме: cmd=14, param[0]=0/1. */
 	uint8_t feedback_inverted;
 
 	/* Задержка перед переключением реле, секунды (0..255).

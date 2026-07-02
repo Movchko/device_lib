@@ -192,6 +192,19 @@ void VDeviceRelay::CommandCB(uint8_t Command, uint8_t *Parameters)
 		if (VDeviceSaveCfg != nullptr) {
 			VDeviceSaveCfg();
 		}
+	} else if (Command == 14u) {
+		/* cmd=14: установить feedback_inverted (0/1). */
+		uint8_t inverted = 0u;
+		if (Parameters != nullptr && Parameters[0] != 0u) {
+			inverted = 1u;
+		}
+		feedback_inverted = inverted;
+		if (Config != nullptr) {
+			Config->feedback_inverted = feedback_inverted;
+		}
+		if (VDeviceSaveCfg != nullptr) {
+			VDeviceSaveCfg();
+		}
 	}
 
 }
