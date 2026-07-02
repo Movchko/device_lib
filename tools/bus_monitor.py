@@ -590,10 +590,12 @@ def run_read_config(ser, bsu: BSUParser, h_adr: int | None, l_adr: int = 0, zone
 
 
 # --- Смещения PPKYCfg / MKUCfg (device_lib/include/device_config.h, ARM GCC) ---
-CFG_BASE = 76  # UniqId(32) + beep..was_fire + pad + baudrates + reserv[23] до CfgDevices[0]
+CFG_BASE = 72  # UniqId(32) + beep..isBRP(8) + was_fire(u32) + baudrates + reserv[20] до CfgDevices[0]
 PPKY_WAS_FIRE_OFF = 40
 PPKY_EX_CAN_BAUD_OFF = 44
 PPKY_EX_RS485_BAUD_OFF = 48
+PPKY_RESERV_OFF = 52
+PPKY_RESERV_BYTES = 20
 ZONE_NUMBER_CFG = 100
 ZONE_NAME_SIZE_CFG = 64
 ZONE_NAME_AREA_CFG = ZONE_NUMBER_CFG * ZONE_NAME_SIZE_CFG  # 6400
@@ -608,15 +610,499 @@ MKU_DEVICES0_OFF = MKU_UID_BYTES + MKU_VDTYPE_BYTES + 4 + MKU_MODULE_DELAY_BYTES
 # module_delay[32] идёт сразу после zone_delay (uint32 LE на слот)
 MKU_ZONE_DELAY_OFF = MKU_UID_BYTES + MKU_VDTYPE_BYTES  # 160
 MKU_MODULE_DELAY_OFF = MKU_ZONE_DELAY_OFF + 4  # 164
-MKU_STRIDE_BYTES = MKU_DEVICES0_OFF + NUM_DEV_IN_MCU_CFG * 64 + 64  # 2404 = sizeof(MKUCfg)
-MKU_TOTAL_WORDS = MKU_STRIDE_BYTES // 4  # 601 слов на один MKUCfg
+MKU_STRIDE_BYTES = MKU_DEVICES0_OFF + NUM_DEV_IN_MCU_CFG * 64 + 64  # 2404 = sizeof(MKUCfg) new
+MKU_STRIDE_OLD_BYTES = 1060  # legacy: UId + Devices[16]×(type+reserv[63])
+MKU_OLD_DEVICES0_OFF = MKU_UID_BYTES  # Devices[0] сразу после UId
+MKU_OLD_MAX_SLOTS = 16
+MKU_TOTAL_WORDS = MKU_STRIDE_BYTES // 4  # 601 слов на один MKUCfg (new)
 MKU_POST_UID_WORDS = (MKU_STRIDE_BYTES - MKU_UID_BYTES) // 4  # 593 слова после UId
+
+# Слоты виртуальных устройств по типу платы МКУ (device.hpp)
+MCU_HARDWARE_SLOTS: dict[int, list[int]] = {
+    13: [11, 12],         # МКУ_IGN
+    14: [12],             # МКУ_TC
+    20: [11, 11, 12],     # МКУ_K1: 2 спички + ДПТ
+    21: [11, 11, 11],     # МКУ_K2: 3 спички
+    22: [16, 16, 11],     # МКУ_K3: 2 концевика + спичка
+    23: [17, 17],         # МКУ_KR: 2 реле
+}
+
+
+def _valid_mku_header(cfg: bytes, off: int) -> bool:
+    if off + 24 > len(cfg):
+        return False
+    if all(cfg[off + k] == 0 for k in range(32)):
+        return False
+    return cfg[off + 23] in MKU_DEVICE_TYPES
+
+
+MKU_DEVICE_TYPES = (13, 14, 20, 21, 22, 23)
+VD_DEVICE_TYPES = (11, 12, 15, 16, 17)
+
+
+def _mku_header_count(cfg: bytes, stride: int) -> int:
+    count = 0
+    for i in range(NUM_DEV_IN_MCU_CFG):
+        if not _valid_mku_header(cfg, CFG_BASE + i * stride):
+            break
+        count += 1
+    return count
+
+
+def _score_mku_device_payload(cfg: bytes, mku_off: int, layout: str) -> int:
+    """Оценка правдоподобности данных виртуальных устройств для выбора old/new layout."""
+    if mku_off + 24 > len(cfg):
+        return 0
+    board = cfg[mku_off + 23]
+    hw = MCU_HARDWARE_SLOTS.get(board, [])
+    slot_count = len(hw) if hw else (MKU_OLD_MAX_SLOTS if layout == "old" else 8)
+    score = 0
+    for j in range(slot_count):
+        if layout == "new":
+            vd = _mku_vdtype(cfg, mku_off, j)
+            ro = mku_off + MKU_DEVICES0_OFF + j * 64
+            if ro + 64 > len(cfg):
+                break
+            reserv = cfg[ro : ro + 64]
+            dtype = vd if vd in VD_DEVICE_TYPES else (hw[j] if j < len(hw) else 0)
+        else:
+            base = mku_off + MKU_OLD_DEVICES0_OFF + j * 64
+            if base + 64 > len(cfg):
+                break
+            dtype = cfg[base]
+            reserv = cfg[base + 1 : base + 64]
+        if dtype not in VD_DEVICE_TYPES:
+            continue
+        if not any(reserv[:32]):
+            continue
+        if dtype == 11 and len(reserv) >= 6:
+            lo = struct.unpack_from("<H", reserv, 2)[0]
+            hi = struct.unpack_from("<H", reserv, 4)[0]
+            if 100 <= lo <= 10000 and lo <= hi <= 20000:
+                score += 4
+            else:
+                score += 1
+        elif dtype in (12, 15, 16, 17):
+            score += 2
+        else:
+            score += 1
+    return score
+
+
+def detect_mku_stride_from_cfg(cfg: bytes, size_raw: int | None = None) -> tuple[int, str]:
+    """Выбрать sizeof(MKUCfg): размер с ППКУ, число заголовков МКУ, содержимое слотов."""
+    raw = size_raw if size_raw is not None else len(cfg)
+    tail = ZONE_NAME_AREA_CFG + FIRE_AND_BYTES_CFG + PPKY_TAIL_BYTES_CFG
+    threshold_new = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES + tail - 512
+
+    old_count = _mku_header_count(cfg, MKU_STRIDE_OLD_BYTES)
+    new_count = _mku_header_count(cfg, MKU_STRIDE_BYTES)
+
+    candidates: list[tuple[int, str, int]] = [
+        (old_count, "old", MKU_STRIDE_OLD_BYTES),
+        (new_count, "new", MKU_STRIDE_BYTES),
+    ]
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    best_count, best_layout, best_stride = candidates[0]
+
+    if best_count > 0 and candidates[0][0] == candidates[1][0]:
+        score_old = _score_mku_device_payload(cfg, CFG_BASE, "old")
+        score_new = _score_mku_device_payload(cfg, CFG_BASE, "new")
+        if score_new > score_old:
+            best_stride, best_layout = MKU_STRIDE_BYTES, "new"
+        elif score_old > score_new:
+            best_stride, best_layout = MKU_STRIDE_OLD_BYTES, "old"
+        elif raw >= threshold_new:
+            best_stride, best_layout = MKU_STRIDE_BYTES, "new"
+        else:
+            best_stride, best_layout = MKU_STRIDE_OLD_BYTES, "old"
+
+    if best_count > 0:
+        if raw < threshold_new - 1000 and best_layout == "new" and old_count >= new_count:
+            score_old = _score_mku_device_payload(cfg, CFG_BASE, "old")
+            score_new = _score_mku_device_payload(cfg, CFG_BASE, "new")
+            if score_old >= score_new:
+                return MKU_STRIDE_OLD_BYTES, "old"
+        return best_stride, best_layout
+
+    if raw >= threshold_new:
+        return MKU_STRIDE_BYTES, "new"
+    return MKU_STRIDE_OLD_BYTES, "old"
+
+
+def _reserv_has_data(reserv: bytes) -> bool:
+    return len(reserv) >= 8 and any(reserv[:32])
+
+
+def _mku_vdtype(cfg: bytes, mku_off: int, slot: int) -> int:
+    vd_off = mku_off + MKU_UID_BYTES + slot * 4
+    if vd_off + 4 > len(cfg):
+        return 0
+    return _u32_le_buf(cfg, vd_off) & 0xFF
+
+
+def iter_mku_virtual_devices(
+    cfg: bytes, mku_off: int, mku_stride: int, mku_board_type: int, layout: str
+) -> list[tuple[int, int, bytes]]:
+    """Список (slot, vd_type, reserv64) для одного MKUCfg."""
+    out: list[tuple[int, int, bytes]] = []
+    hw = MCU_HARDWARE_SLOTS.get(mku_board_type, [])
+
+    if layout == "new":
+        slot_count = len(hw) if hw else NUM_DEV_IN_MCU_CFG
+        for j in range(slot_count):
+            reserv_off = mku_off + MKU_DEVICES0_OFF + j * 64
+            if reserv_off + 64 > len(cfg):
+                break
+            reserv = cfg[reserv_off : reserv_off + 64]
+            vd_type = _mku_vdtype(cfg, mku_off, j)
+            if not vd_type and j < len(hw):
+                vd_type = hw[j]
+            if not vd_type and not _reserv_has_data(reserv):
+                continue
+            if not vd_type:
+                continue
+            out.append((j, vd_type, reserv))
+        return out
+
+    max_slots = min(MKU_OLD_MAX_SLOTS, max(0, (mku_stride - MKU_OLD_DEVICES0_OFF) // 64))
+    for j in range(max_slots):
+        base = mku_off + MKU_OLD_DEVICES0_OFF + j * 64
+        if base + 64 > len(cfg):
+            break
+        vd_type = cfg[base]
+        reserv = bytearray(64)
+        reserv[:63] = cfg[base + 1 : base + 64]
+        if not vd_type and not _reserv_has_data(reserv):
+            continue
+        if not vd_type:
+            continue
+        out.append((j, vd_type, bytes(reserv)))
+    return out
 
 # Минимальный размер PPKYCfg по device_config.h (чтобы хвост fire_and/beep_block помещался в буфер)
 MIN_PPKY_CFG_BYTES = (
     CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES + ZONE_NAME_AREA_CFG
     + FIRE_AND_BYTES_CFG + PPKY_TAIL_BYTES_CFG
 )
+
+SVC_SET_CONFIG_WORD = 153
+SVC_SAVE_CONFIG = 154
+MKU_UID_WORD_COUNT = MKU_UID_BYTES // 4  # 8 слов UniqId
+
+
+def _dpt_reserv_cfg(mode: int = 0, use_max: int = 1, max_c: int = 60, delay_ms: int = 100) -> bytes:
+    reserv = bytearray(64)
+    reserv[0] = mode & 0xFF
+    reserv[1] = use_max & 0xFF
+    struct.pack_into("<H", reserv, 2, max_c)
+    struct.pack_into("<H", reserv, 4, delay_ms)
+    return bytes(reserv)
+
+
+def _igniter_reserv_cfg(
+    low: int = 100, high: int = 1000, retry: int = 0, disable_sc: int = 0
+) -> bytes:
+    reserv = bytearray(64)
+    reserv[0] = disable_sc & 0xFF
+    struct.pack_into("<H", reserv, 2, low)
+    struct.pack_into("<H", reserv, 4, high)
+    reserv[6] = retry & 0xFF
+    return bytes(reserv)
+
+
+def _relay_reserv_cfg(settle_ms: int = 100) -> bytes:
+    reserv = bytearray(64)
+    struct.pack_into("<H", reserv, 4, settle_ms)
+    return bytes(reserv)
+
+
+def _button_k3_reserv_cfg() -> bytes:
+    """MCU_k3_v097 DefaultConfig: Devices[0]."""
+    reserv = bytearray(64)
+    reserv[0] = 2  # mode: кнопка
+    reserv[1] = 0  # use_max
+    struct.pack_into("<H", reserv, 2, 60)
+    struct.pack_into("<H", reserv, 4, 100)
+    reserv[6] = 0  # DeviceButtonKind_StartSP
+    return bytes(reserv)
+
+
+def _lswitch_k3_reserv_cfg() -> bytes:
+    """MCU_k3_v097 DefaultConfig: Devices[1] (голова DPT + нули в хвосте)."""
+    reserv = bytearray(64)
+    reserv[0] = 1  # mode: концевик
+    reserv[1] = 0  # use_max
+    struct.pack_into("<H", reserv, 2, 60)
+    struct.pack_into("<H", reserv, 4, 100)
+    return bytes(reserv)
+
+
+def _pack_mkucfg_body(
+    vdtypes: list[int],
+    zone_delay: int,
+    module_delays: list[int],
+    device_slots: dict[int, bytes],
+) -> bytes:
+    """MKUCfg без UId: VDtype, задержки, Devices[], reserv[64] (как после memset+DefaultConfig)."""
+    body = bytearray(MKU_STRIDE_BYTES - MKU_UID_BYTES)
+    for slot, vd in enumerate(vdtypes[:NUM_DEV_IN_MCU_CFG]):
+        struct.pack_into("<I", body, slot * 4, vd & 0xFF)
+    zd_rel = MKU_ZONE_DELAY_OFF - MKU_UID_BYTES
+    struct.pack_into("<I", body, zd_rel, zone_delay)
+    md_rel = MKU_MODULE_DELAY_OFF - MKU_UID_BYTES
+    for slot, md in enumerate(module_delays[:NUM_DEV_IN_MCU_CFG]):
+        struct.pack_into("<I", body, md_rel + slot * 4, md)
+    dev_rel = MKU_DEVICES0_OFF - MKU_UID_BYTES
+    for slot, reserv in device_slots.items():
+        if 0 <= slot < NUM_DEV_IN_MCU_CFG:
+            body[dev_rel + slot * 64 : dev_rel + slot * 64 + 64] = reserv[:64]
+    return bytes(body)
+
+
+def build_mku_factory_cfg(d_type: int) -> bytes | None:
+    """
+    Полный MKUCfg (2404 байта) как DefaultConfig() в прошивке соответствующей платы.
+    UId обнулён — подставляется из устройства перед записью.
+    Источники: MCU_k1/k2/k3/kr_v097, MCU_TC Core/Src/app.cpp.
+    """
+    ign = _igniter_reserv_cfg()
+    if d_type == 20:  # MCU_K1
+        body = _pack_mkucfg_body(
+            vdtypes=[12, 11, 11],
+            zone_delay=5,
+            module_delays=[0, 2, 3],
+            device_slots={
+                0: _dpt_reserv_cfg(mode=0, use_max=1, max_c=60, delay_ms=100),
+                1: ign,
+                2: ign,
+            },
+        )
+    elif d_type == 21:  # MCU_K2
+        body = _pack_mkucfg_body(
+            vdtypes=[11, 11, 11],
+            zone_delay=5,
+            module_delays=[0, 2, 4],
+            device_slots={0: ign, 1: ign, 2: ign},
+        )
+    elif d_type == 22:  # MCU_K3
+        body = _pack_mkucfg_body(
+            vdtypes=[15, 16, 11],
+            zone_delay=5,
+            module_delays=[0, 0, 2],
+            device_slots={0: _button_k3_reserv_cfg(), 1: _lswitch_k3_reserv_cfg(), 2: ign},
+        )
+    elif d_type == 23:  # MCU_KR
+        relay = _relay_reserv_cfg()
+        body = _pack_mkucfg_body(
+            vdtypes=[17, 17],
+            zone_delay=0,
+            module_delays=[],
+            device_slots={0: relay, 1: relay},
+        )
+    elif d_type == 14:  # MCU_TC
+        body = _pack_mkucfg_body(
+            vdtypes=[12],
+            zone_delay=0,
+            module_delays=[],
+            device_slots={
+                0: _dpt_reserv_cfg(mode=0, use_max=1, max_c=100, delay_ms=100),
+            },
+        )
+    else:
+        return None
+    cfg = bytearray(MKU_STRIDE_BYTES)
+    cfg[MKU_UID_BYTES:] = body
+    return bytes(cfg)
+
+
+def _config_io_timeouts(transport_hint: str) -> tuple[float, float]:
+    th = (transport_hint or "auto").strip().lower()
+    if th == "wifi":
+        return 5.0, 0.02
+    return 2.0, 0.006
+
+
+def _wait_device_config_response(
+    ser,
+    bsu: BSUParser,
+    can_id_req: int,
+    req_data: bytes,
+    expected_cmd: int,
+    expected_word_idx: int | None = None,
+    transport_hint: str = "auto",
+) -> bytes | None:
+    """Ожидание сервисного ответа Get/SetConfigWord от конкретного устройства."""
+    total_timeout, retry_ms = _config_io_timeouts(transport_hint)
+    target = parse_can_id(can_id_req)
+    old_timeout = ser.timeout
+    ser.timeout = 0
+    deadline = time.time() + total_timeout
+    try:
+        while time.time() < deadline:
+            pkt = build_bsu_can_packet(can_id_req, req_data)
+            ser.write(pkt)
+            retry_deadline = time.time() + retry_ms
+            while time.time() < retry_deadline:
+                chunk = ser.read(512)
+                for b in chunk:
+                    result = bsu.feed(b)
+                    if not result:
+                        continue
+                    rid, rdata = result[0], result[1]
+                    if len(rdata) == 0 or rdata[0] != expected_cmd:
+                        continue
+                    p = parse_can_id(rid)
+                    if p["dir"] != 1:
+                        continue
+                    if (
+                        p["d_type"] != target["d_type"]
+                        or p["h_adr"] != target["h_adr"]
+                        or p["l_adr"] != target["l_adr"]
+                        or p["zone"] != target["zone"]
+                    ):
+                        continue
+                    if expected_word_idx is not None and len(rdata) >= 3:
+                        got_idx = (rdata[1] << 8) | rdata[2]
+                        if got_idx != expected_word_idx:
+                            continue
+                    return rdata
+                if not chunk:
+                    time.sleep(0.001)
+    finally:
+        ser.timeout = old_timeout
+    return None
+
+
+def read_mku_config_word(
+    ser,
+    bsu: BSUParser,
+    d_type: int,
+    h_adr: int,
+    l_adr: int,
+    zone: int,
+    word_idx: int,
+    transport_hint: str = "auto",
+) -> int | None:
+    can_id = build_can_id(d_type, h_adr, l_adr, zone, 0)
+    req = bytes([SVC_GET_CONFIG_WORD, (word_idx >> 8) & 0xFF, word_idx & 0xFF]) + b"\x00" * 5
+    rsp = _wait_device_config_response(
+        ser, bsu, can_id, req, SVC_GET_CONFIG_WORD, expected_word_idx=word_idx, transport_hint=transport_hint
+    )
+    if not rsp or len(rsp) < 7:
+        return None
+    return struct.unpack(">I", rsp[3:7])[0]
+
+
+def write_mku_config_word(
+    ser,
+    bsu: BSUParser,
+    d_type: int,
+    h_adr: int,
+    l_adr: int,
+    zone: int,
+    word_idx: int,
+    word_be: int,
+    transport_hint: str = "auto",
+) -> bool:
+    can_id = build_can_id(d_type, h_adr, l_adr, zone, 0)
+    req = bytes([
+        SVC_SET_CONFIG_WORD,
+        (word_idx >> 8) & 0xFF,
+        word_idx & 0xFF,
+        (word_be >> 24) & 0xFF,
+        (word_be >> 16) & 0xFF,
+        (word_be >> 8) & 0xFF,
+        word_be & 0xFF,
+    ]) + b"\x00" * 2
+    rsp = _wait_device_config_response(
+        ser, bsu, can_id, req, SVC_SET_CONFIG_WORD, expected_word_idx=word_idx, transport_hint=transport_hint
+    )
+    return rsp is not None
+
+
+def save_mku_config(
+    ser,
+    bsu: BSUParser,
+    d_type: int,
+    h_adr: int,
+    l_adr: int,
+    zone: int,
+    transport_hint: str = "auto",
+) -> bool:
+    can_id = build_can_id(d_type, h_adr, l_adr, zone, 0)
+    req = bytes([SVC_SAVE_CONFIG]) + b"\x00" * 7
+    rsp = _wait_device_config_response(
+        ser, bsu, can_id, req, SVC_SAVE_CONFIG, transport_hint=transport_hint
+    )
+    return rsp is not None
+
+
+def apply_mku_factory_defaults(
+    ser,
+    bsu: BSUParser,
+    d_type: int,
+    h_adr: int,
+    l_adr: int,
+    zone: int,
+    transport_hint: str = "auto",
+    progress_callback=None,
+) -> bool:
+    """Сбросить MKUCfg как DefaultConfig() в прошивке платы, сохранив только UId (адрес/ID)."""
+    uid = bytearray(MKU_UID_BYTES)
+    for word_idx in range(MKU_UID_WORD_COUNT):
+        word_be = read_mku_config_word(
+            ser, bsu, d_type, h_adr, l_adr, zone, word_idx, transport_hint=transport_hint
+        )
+        if word_be is None:
+            return False
+        struct.pack_into(">I", uid, word_idx * 4, word_be)
+
+    factory = build_mku_factory_cfg(d_type)
+    if factory is None:
+        return False
+
+    new_cfg = bytearray(factory)
+    new_cfg[:MKU_UID_BYTES] = uid
+
+    for n, word_idx in enumerate(range(MKU_TOTAL_WORDS)):
+        pos = word_idx * 4
+        word_be = struct.unpack(">I", new_cfg[pos : pos + 4])[0]
+        if not write_mku_config_word(
+            ser, bsu, d_type, h_adr, l_adr, zone, word_idx, word_be, transport_hint=transport_hint
+        ):
+            return False
+        if progress_callback:
+            progress_callback(n + 1, MKU_TOTAL_WORDS)
+
+    return save_mku_config(ser, bsu, d_type, h_adr, l_adr, zone, transport_hint=transport_hint)
+
+
+def apply_mku_factory_defaults_all(
+    ser,
+    bsu: BSUParser,
+    mku_list: list[tuple[int, int, int, int]],
+    transport_hint: str = "auto",
+    mku_progress_callback=None,
+) -> tuple[int, int]:
+    """Применить заводские настройки к списку МКУ: [(d_type, h, l, zone), ...]."""
+    ok = 0
+    total = len(mku_list)
+    for i, mku in enumerate(mku_list):
+        d_type, h_adr, l_adr, zone = mku
+        if mku_progress_callback:
+            mku_progress_callback(i, total, mku)
+        if apply_mku_factory_defaults(
+            ser,
+            bsu,
+            d_type,
+            h_adr,
+            l_adr,
+            zone,
+            transport_hint=transport_hint,
+        ):
+            ok += 1
+    return ok, total
 
 
 def read_config_bytes(
@@ -724,20 +1210,24 @@ def read_config_bytes(
             rsp = wait_response(req, SVC_GET_CONFIG_SIZE, broadcast_req=True, accept_any_ppky_addr=True)
     if not rsp or len(rsp) < 5:
         return (None, 0)
-    size_bytes = ((rsp[1] << 24) |
-                  (rsp[2] << 16) |
-                  (rsp[3] << 8)  |
-                   rsp[4])
-    # Если прошивка отдаёт размер без хвоста (или с усечённым округлением), расширяем буфер
-    # до минимума, иначе слова fire_and (слово #20850 при стандартном sizeof) не попадают в буфер.
-    if size_bytes < MIN_PPKY_CFG_BYTES:
-        size_bytes = MIN_PPKY_CFG_BYTES
+    size_bytes_raw = ((rsp[1] << 24) |
+                      (rsp[2] << 16) |
+                      (rsp[3] << 8)  |
+                       rsp[4])
+    # Буфер расширяем при необходимости, но stride MKUCfg определяем по фактическому размеру с ППКУ.
+    size_bytes = size_bytes_raw if size_bytes_raw >= MIN_PPKY_CFG_BYTES else max(size_bytes_raw, MIN_PPKY_CFG_BYTES)
 
-    # --- 1. Базовые параметры структуры (PPKYCfg: CfgDevices[32] фикс. sizeof(MKUCfg)) ---
+    # --- 1. Базовые параметры структуры (PPKYCfg: CfgDevices[32]×sizeof(MKUCfg)) ---
     ZONE_NAME_SIZE = ZONE_NAME_SIZE_CFG
     ZONE_NUMBER = ZONE_NUMBER_CFG
     ZONE_NAME_AREA = ZONE_NAME_AREA_CFG
-    MKUCFG_STRIDE = MKU_STRIDE_BYTES
+    # Stride MKUCfg по заявленному размеру с ППКУ (до расширения буфера).
+    ppky_tail = ZONE_NAME_AREA_CFG + FIRE_AND_BYTES_CFG + PPKY_TAIL_BYTES_CFG
+    if size_bytes_raw >= CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES + ppky_tail - 512:
+        MKUCFG_STRIDE = MKU_STRIDE_BYTES
+    else:
+        MKUCFG_STRIDE = MKU_STRIDE_OLD_BYTES
+    MKU_BLOCK_WORDS = (MKUCFG_STRIDE + 3) // 4
     zone_name_offset = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKUCFG_STRIDE
 
     num_words = (size_bytes + 3) // 4
@@ -869,8 +1359,8 @@ def read_config_bytes(
         if uid_zero:
             break
 
-        # 3.2 Остаток MKUCfg: VDtype, zone_delay, module_delay, Devices[32], reserv[64]
-        for idx in range(base_idx + UID_WORDS, base_idx + MKU_TOTAL_WORDS):
+        # 3.2 Остаток MKUCfg: VDtype/Devices, задержки, reserv
+        for idx in range(base_idx + UID_WORDS, base_idx + MKU_BLOCK_WORDS):
             if idx >= num_words:
                 break
             if not store_word(idx):
@@ -920,7 +1410,7 @@ def read_config_bytes(
 
     # Возвращаем фактическую длину буфера (после возможного расширения до MIN_PPKY_CFG_BYTES)
     out_len = len(config)
-    return (bytes(config[:out_len]), out_len)
+    return (bytes(config[:out_len]), size_bytes_raw)
 
 
 # device_config.h: типы устройств (совпадает с device.hpp, device_config.h)
@@ -1035,15 +1525,18 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
     return " | ".join(parts)
 
 
-def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
+def parse_config_display(
+    cfg: bytes, debug_dump: bool = False, config_size_raw: int | None = None
+) -> list[str]:
     """
     Парсит PPKYCfg (device_config.h) и возвращает список строк с полями.
-    PPKYCfg: UniqId(32), beep..was_fire, baudrates, reserv[23], CfgDevices[32]×MKUCfg,
+    PPKYCfg: UniqId(32), beep..isBRP, was_fire(u32), baudrates, reserv[20], CfgDevices[32]×MKUCfg,
     zone_name[100][64], fire_and[100], beep_block, wifi_block.
     MKUCfg: UId, VDtype[32], zone_delay, module_delay[32], Devices[32]×64, reserv[64].
     """
     lines: list[str] = []
-    zone_name_offset = CFG_BASE + NUM_DEV_IN_MCU_CFG * MKU_STRIDE_BYTES
+    mku_stride, mku_layout = detect_mku_stride_from_cfg(cfg, config_size_raw)
+    zone_name_offset = CFG_BASE + NUM_DEV_IN_MCU_CFG * mku_stride
     fire_and_offset = zone_name_offset + ZONE_NAME_AREA_CFG
     min_full = fire_and_offset + FIRE_AND_BYTES_CFG + PPKY_TAIL_BYTES_CFG
 
@@ -1053,8 +1546,9 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
         tail = len(cfg) - fire_and_offset - FIRE_AND_BYTES_CFG - PPKY_TAIL_BYTES_CFG
         mku_guess = tail // NUM_DEV_IN_MCU_CFG if tail > 0 else 0
         lines.append(
-            f"--- size={len(cfg)} min_full≈{min_full} CFG_BASE={CFG_BASE} MKU_stride={MKU_STRIDE_BYTES} "
-            f"zone_off={zone_name_offset} fire_and_off={fire_and_offset} ---"
+            f"--- size={len(cfg)} min_full≈{min_full} CFG_BASE={CFG_BASE} "
+            f"MKU_stride={mku_stride}({mku_layout}) zone_off={zone_name_offset} "
+            f"fire_and_off={fire_and_offset} ---"
         )
         if len(cfg) >= CFG_BASE + 24:
             off0 = CFG_BASE
@@ -1086,7 +1580,7 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
     ex_can_on = cfg[37]
     ex_can_protocol = cfg[38]
     is_brp = cfg[39]
-    was_fire = cfg[PPKY_WAS_FIRE_OFF] if len(cfg) > PPKY_WAS_FIRE_OFF else 0
+    was_fire = _u32_le_buf(cfg, PPKY_WAS_FIRE_OFF) if len(cfg) >= PPKY_WAS_FIRE_OFF + 4 else 0
     ex_can_baud = _u32_le_buf(cfg, PPKY_EX_CAN_BAUD_OFF) if len(cfg) >= PPKY_EX_CAN_BAUD_OFF + 4 else 0
     ex_rs485_baud = _u32_le_buf(cfg, PPKY_EX_RS485_BAUD_OFF) if len(cfg) >= PPKY_EX_RS485_BAUD_OFF + 4 else 0
     fm = ("авто", "автоном", "ручной")
@@ -1104,8 +1598,8 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
         lines.append(f"ex_rs485_baudrate={ex_rs485_baud}")
 
     for i in range(NUM_DEV_IN_MCU_CFG):
-        off = CFG_BASE + i * MKU_STRIDE_BYTES
-        if off + MKU_STRIDE_BYTES > len(cfg):
+        off = CFG_BASE + i * mku_stride
+        if off + MKU_UID_BYTES > len(cfg):
             break
         zone = cfg[off + 20]
         l_adr = cfg[off + 21]
@@ -1115,30 +1609,28 @@ def parse_config_display(cfg: bytes, debug_dump: bool = False) -> list[str]:
         if uid_empty:
             break
 
-        zd = _u32_le_buf(cfg, off + MKU_ZONE_DELAY_OFF)
         d_name = _device_name(d_type)
-        mod_delays: list[str] = []
-        for j in range(NUM_DEV_IN_MCU_CFG):
-            vd_type_j = _u32_le_buf(cfg, off + 32 + j * 4)
-            if vd_type_j == 0:
-                continue
-            md_j = _u32_le_buf(cfg, off + MKU_MODULE_DELAY_OFF + j * 4)
-            mod_delays.append(f"сл.{j}:{md_j}с")
-        md_part = f" module_delay={','.join(mod_delays)}" if mod_delays else ""
-        lines.append(
-            f"CfgDevices[{i}]: {d_name} h={h_adr} l={l_adr} z={zone} zone_delay={zd}с{md_part}"
-        )
+        header = f"CfgDevices[{i}]: {d_name} h={h_adr} l={l_adr} z={zone}"
+        if mku_layout == "new" and off + MKU_ZONE_DELAY_OFF + 4 <= len(cfg):
+            zd = _u32_le_buf(cfg, off + MKU_ZONE_DELAY_OFF)
+            mod_delays: list[str] = []
+            for j in range(NUM_DEV_IN_MCU_CFG):
+                vd_type_j = _mku_vdtype(cfg, off, j)
+                if vd_type_j == 0:
+                    continue
+                if off + MKU_MODULE_DELAY_OFF + j * 4 + 4 <= len(cfg):
+                    md_j = _u32_le_buf(cfg, off + MKU_MODULE_DELAY_OFF + j * 4)
+                    mod_delays.append(f"сл.{j}:{md_j}с")
+            md_part = f" zone_delay={zd}с" if zd else ""
+            if mod_delays:
+                md_part += f" module_delay={','.join(mod_delays)}"
+            header += md_part
+        lines.append(header)
 
-        for j in range(NUM_DEV_IN_MCU_CFG):
-            vd_off = off + 32 + j * 4
-            vd_type = _u32_le_buf(cfg, vd_off)
-            if vd_type == 0:
-                continue
-            dev_res_off = off + MKU_DEVICES0_OFF + j * 64
-            reserv = cfg[dev_res_off : dev_res_off + 64] if dev_res_off + 64 <= len(cfg) else b""
+        for slot, vd_type, reserv in iter_mku_virtual_devices(cfg, off, mku_stride, d_type, mku_layout):
             extras = _device_cfg_extras(vd_type, reserv)
             suf = f" — {extras}" if extras else ""
-            lines.append(f"  dev[{j}] {_device_name(vd_type)}{suf}")
+            lines.append(f"  dev[{slot}] {_device_name(vd_type)}{suf}")
 
     # Имена зон
     for z in range(ZONE_NUMBER_CFG):

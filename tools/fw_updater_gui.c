@@ -28,6 +28,10 @@
 #define IDC_BTN_FORCE_VERSION 112
 #define IDC_CHK_VERIFY        113
 #define IDC_EDIT_BATCH        114
+#define IDC_BTN_COLLECT       115
+
+#define FW_WORKSPACE_ROOT     L"D:\\work\\stm_workspace\\"
+#define FW_COLLECT_DST        L"D:\\work\\stm_workspace\\firmware_MKU"
 
 #define DEFAULT_BATCH_SIZE    8u
 #define MIN_BATCH_SIZE        1u
@@ -67,6 +71,8 @@ typedef struct {
     uint32_t last_seen_ms;
     uint8_t version_valid;
     uint32_t version;
+    char version_str[64];
+    uint8_t version_pkt_next;
 } DeviceInfo;
 
 typedef struct {
@@ -449,7 +455,12 @@ static void RefreshDeviceListRow(int idx) {
     wsprintfW(text, L"%u", g_devices[idx].h_adr); it.iSubItem = 1; it.pszText = text; ListView_SetItem(g_hDevices, &it);
     wsprintfW(text, L"%u", g_devices[idx].l_adr); it.iSubItem = 2; it.pszText = text; ListView_SetItem(g_hDevices, &it);
     wsprintfW(text, L"%u", g_devices[idx].zone);  it.iSubItem = 3; it.pszText = text; ListView_SetItem(g_hDevices, &it);
-    if (g_devices[idx].version_valid) wsprintfW(text, L"%u", g_devices[idx].version);
+    if (g_devices[idx].version_valid) {
+        if (g_devices[idx].version_str[0] != '\0')
+            wsprintfW(text, L"%S", g_devices[idx].version_str);
+        else
+            wsprintfW(text, L"%u", g_devices[idx].version);
+    }
     else wsprintfW(text, L"...");
     it.iSubItem = 4; it.pszText = text; ListView_SetItem(g_hDevices, &it);
 }
@@ -464,6 +475,54 @@ static void AddDeviceToList(int idx) {
     it.pszText = text;
     ListView_InsertItem(g_hDevices, &it);
     RefreshDeviceListRow(idx);
+}
+
+static void ResetDeviceVersionAssembly(DeviceInfo *d) {
+    if (!d) return;
+    d->version_valid = 0;
+    d->version = 0;
+    d->version_str[0] = '\0';
+    d->version_pkt_next = 0;
+}
+
+static void ParseVersionString(DeviceInfo *d) {
+    uint32_t fw = 0;
+    if (!d) return;
+    if (sscanf(d->version_str, "fw=%u", &fw) == 1) {
+        d->version = fw;
+    } else {
+        d->version = 0;
+    }
+    d->version_valid = 1;
+}
+
+static void HandleVersionPacket(DeviceInfo *d, const uint8_t *data) {
+    uint8_t pkt;
+    size_t len;
+    int i;
+
+    if (!d || !data) return;
+    pkt = data[1];
+    if (pkt == 0) {
+        ResetDeviceVersionAssembly(d);
+    } else if (pkt != d->version_pkt_next) {
+        ResetDeviceVersionAssembly(d);
+        d->version_pkt_next = pkt;
+    }
+
+    len = strlen(d->version_str);
+    for (i = 2; i < 8; i++) {
+        if (data[i] == 0) {
+            ParseVersionString(d);
+            d->version_pkt_next = 0;
+            return;
+        }
+        if (len + 1 >= sizeof(d->version_str))
+            break;
+        d->version_str[len++] = (char)data[i];
+        d->version_str[len] = '\0';
+    }
+    d->version_pkt_next = (uint8_t)(pkt + 1u);
 }
 
 static int IsMcuType(uint8_t d_type) {
@@ -484,7 +543,7 @@ static void InvalidateDeviceVersionCache(const DeviceInfo *d) {
             g_devices[i].h_adr == d->h_adr &&
             g_devices[i].l_adr == d->l_adr &&
             g_devices[i].zone == d->zone) {
-            g_devices[i].version_valid = 0;
+            ResetDeviceVersionAssembly(&g_devices[i]);
             RefreshDeviceListRow(i);
             return;
         }
@@ -643,7 +702,7 @@ static void ForceReadVersions(void) {
         if (!IsMcuType(g_devices[i].d_type)) continue;
         /* Сбрасываем кэш версии, чтобы авто-опрос продолжал слать GET_VERSION,
          * пока устройство не вернёт актуальный номер. */
-        g_devices[i].version_valid = 0;
+        ResetDeviceVersionAssembly(&g_devices[i]);
         RefreshDeviceListRow(i);
         RequestDeviceVersion(&g_devices[i]);
         sent++;
@@ -960,6 +1019,172 @@ static void StopUpdate(void) {
     }
 }
 
+typedef struct {
+    const wchar_t *tag;
+    const wchar_t *proj_dir;
+} MkuCollectEntry;
+
+static const MkuCollectEntry g_mku_collect[] = {
+    { L"K1", L"MCU_k1_v097" },
+    { L"K2", L"MCU_k2_v097" },
+    { L"K3", L"MCU_k3_v097" },
+    { L"KR", L"MCU_kr_v095" },
+};
+
+static int EnsureDirectoryExists(const wchar_t *path) {
+    DWORD attr = GetFileAttributesW(path);
+    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) return 1;
+    return CreateDirectoryW(path, NULL) != 0;
+}
+
+static void ClearDirectoryFiles(const wchar_t *dir) {
+    wchar_t pattern[MAX_PATH];
+    wsprintfW(pattern, L"%s\\*", dir);
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (fd.cFileName[0] == L'.' &&
+            (fd.cFileName[1] == L'\0' || (fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0'))) {
+            continue;
+        }
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+        wchar_t fp[MAX_PATH];
+        wsprintfW(fp, L"%s\\%s", dir, fd.cFileName);
+        DeleteFileW(fp);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static int ReadTextFileA(const wchar_t *path, char *buf, size_t buf_sz) {
+    FILE *fp = _wfopen(path, L"rb");
+    if (!fp) return 0;
+    size_t n = fread(buf, 1, buf_sz - 1, fp);
+    fclose(fp);
+    buf[n] = '\0';
+    return (int)(n > 0);
+}
+
+static int ParseUniqDebugFromMainH(const wchar_t *proj_dir, int *uniq_debug) {
+    wchar_t main_h[MAX_PATH];
+    char text[16384];
+    wsprintfW(main_h, L"%s%s\\Core\\Inc\\main.h", FW_WORKSPACE_ROOT, proj_dir);
+    if (!ReadTextFileA(main_h, text, sizeof(text))) return 0;
+    const char *p = strstr(text, "#define UNIQ_DEBUG");
+    if (!p) return 0;
+    p += strlen("#define UNIQ_DEBUG");
+    while (*p == ' ' || *p == '\t') p++;
+    *uniq_debug = atoi(p);
+    return 1;
+}
+
+static int ParseAppVersionU32(const wchar_t *proj_dir, uint32_t *version) {
+    wchar_t upd_path[MAX_PATH];
+    char text[8192];
+    wsprintfW(upd_path, L"%s%s\\Core\\Src\\upd.cpp", FW_WORKSPACE_ROOT, proj_dir);
+    if (!ReadTextFileA(upd_path, text, sizeof(text))) return 0;
+
+    const char *p = strstr(text, "#define APP_VERSION_U32");
+    if (!p) return 0;
+    p += strlen("#define APP_VERSION_U32");
+    while (*p == ' ' || *p == '\t') p++;
+
+    long base = 0;
+    if (sscanf(p, "%ld", &base) != 1) return 0;
+
+    if (strstr(p, "UNIQ_DEBUG")) {
+        int uniq_debug = 0;
+        if (!ParseUniqDebugFromMainH(proj_dir, &uniq_debug)) uniq_debug = 0;
+        *version = (uint32_t)(base + uniq_debug * 100);
+    } else {
+        *version = (uint32_t)base;
+    }
+    return 1;
+}
+
+static int FindBuilderBinInProject(const wchar_t *proj_dir, wchar_t *out_path, size_t out_chars) {
+    static const wchar_t *configs[] = { L"Debug", L"Release" };
+    wchar_t best_path[MAX_PATH];
+    best_path[0] = L'\0';
+    FILETIME best_time = {0};
+    int found = 0;
+
+    for (size_t ci = 0; ci < sizeof(configs) / sizeof(configs[0]); ci++) {
+        wchar_t pattern[MAX_PATH];
+        wsprintfW(pattern, L"%s%s\\%s\\*_builder.bin", FW_WORKSPACE_ROOT, proj_dir, configs[ci]);
+        WIN32_FIND_DATAW fd;
+        HANDLE h = FindFirstFileW(pattern, &fd);
+        if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            wchar_t full[MAX_PATH];
+            wsprintfW(full, L"%s%s\\%s\\%s", FW_WORKSPACE_ROOT, proj_dir, configs[ci], fd.cFileName);
+            if (!found || CompareFileTime(&fd.ftLastWriteTime, &best_time) > 0) {
+                wcsncpy(best_path, full, MAX_PATH - 1);
+                best_path[MAX_PATH - 1] = L'\0';
+                best_time = fd.ftLastWriteTime;
+                found = 1;
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+
+    if (!found) return 0;
+    wcsncpy(out_path, best_path, out_chars - 1);
+    out_path[out_chars - 1] = L'\0';
+    return 1;
+}
+
+static void CollectFirmwares(void) {
+    if (!EnsureDirectoryExists(FW_COLLECT_DST)) {
+        MessageBoxW(g_hwnd, L"Не удалось создать папку назначения.", L"Собрать", MB_ICONERROR);
+        return;
+    }
+
+    ClearDirectoryFiles(FW_COLLECT_DST);
+    Logf(L"Сборка прошивок МКУ в %s\r\n", FW_COLLECT_DST);
+
+    int ok_count = 0;
+    int fail_count = 0;
+
+    for (size_t i = 0; i < sizeof(g_mku_collect) / sizeof(g_mku_collect[0]); i++) {
+        const MkuCollectEntry *e = &g_mku_collect[i];
+        wchar_t src[MAX_PATH];
+        uint32_t ver = 0;
+
+        if (!FindBuilderBinInProject(e->proj_dir, src, MAX_PATH)) {
+            Logf(L"[ОШИБКА] %s: не найден *_builder.bin\r\n", e->tag);
+            fail_count++;
+            continue;
+        }
+        if (!ParseAppVersionU32(e->proj_dir, &ver)) {
+            Logf(L"[ОШИБКА] %s: не удалось прочитать APP_VERSION_U32\r\n", e->tag);
+            fail_count++;
+            continue;
+        }
+
+        wchar_t dst[MAX_PATH];
+        wsprintfW(dst, L"%s\\MKU_%s_v%u_builder.bin", FW_COLLECT_DST, e->tag, ver);
+        if (!CopyFileW(src, dst, FALSE)) {
+            Logf(L"[ОШИБКА] %s: копирование не удалось\r\n", e->tag);
+            fail_count++;
+            continue;
+        }
+
+        Logf(L"[OK] %s v%u ← %s\r\n", e->tag, ver, src);
+        ok_count++;
+    }
+
+    Logf(L"Сборка завершена: успешно %d, ошибок %d\r\n", ok_count, fail_count);
+    if (fail_count > 0) {
+        MessageBoxW(g_hwnd, L"Сборка завершена с ошибками. См. лог.", L"Собрать", MB_ICONWARNING);
+    } else if (ok_count == 0) {
+        MessageBoxW(g_hwnd, L"Не скопировано ни одного файла.", L"Собрать", MB_ICONWARNING);
+    } else {
+        MessageBoxW(g_hwnd, L"Все прошивки МКУ собраны.", L"Собрать", MB_ICONINFORMATION);
+    }
+}
+
 static void BrowseFile(void) {
     OPENFILENAMEW ofn = {0};
     wchar_t file[MAX_PATH] = {0};
@@ -985,6 +1210,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_hConnect = CreateWindowW(L"BUTTON", L"Подключить", WS_CHILD | WS_VISIBLE, 260, 10, 100, 24, hwnd, (HMENU)IDC_BTN_CONNECT, NULL, NULL);
             CreateWindowW(L"BUTTON", L"Цель обновления...", WS_CHILD | WS_VISIBLE, 370, 10, 140, 24, hwnd, (HMENU)IDC_BTN_SELECT_TARGET, NULL, NULL);
             CreateWindowW(L"BUTTON", L"Прочитать версии", WS_CHILD | WS_VISIBLE, 520, 10, 130, 24, hwnd, (HMENU)IDC_BTN_FORCE_VERSION, NULL, NULL);
+            CreateWindowW(L"BUTTON", L"Собрать", WS_CHILD | WS_VISIBLE, 660, 10, 90, 24, hwnd, (HMENU)IDC_BTN_COLLECT, NULL, NULL);
 
             g_hDevices = CreateWindowW(WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | WS_BORDER,
                                        10, 44, w - 20, 180, hwnd, (HMENU)IDC_LIST_DEVICES, NULL, NULL);
@@ -1050,6 +1276,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                     break;
                 case IDC_BTN_SELECT_TARGET: SelectUpdateTarget(); break;
                 case IDC_BTN_FORCE_VERSION: ForceReadVersions(); break;
+                case IDC_BTN_COLLECT: CollectFirmwares(); break;
                 case IDC_BTN_START: StartUpdate(); break;
                 case IDC_BTN_STOP: StopUpdate(); break;
             }
@@ -1086,18 +1313,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
             if (f.dir == 1 && pp->data[0] == CMD_GET_VERSION) {
-                uint32_t ver = ((uint32_t)pp->data[1] << 24) |
-                               ((uint32_t)pp->data[2] << 16) |
-                               ((uint32_t)pp->data[3] << 8) |
-                               (uint32_t)pp->data[4];
                 for (int i = 0; i < g_devCount; i++) {
                     if (g_devices[i].d_type == f.d_type &&
                         g_devices[i].h_adr == f.h_adr &&
                         g_devices[i].l_adr == f.l_adr &&
                         g_devices[i].zone == f.zone) {
-                        g_devices[i].version = ver;
-                        g_devices[i].version_valid = 1;
-                        RefreshDeviceListRow(i);
+                        HandleVersionPacket(&g_devices[i], pp->data);
+                        if (g_devices[i].version_valid)
+                            RefreshDeviceListRow(i);
                         break;
                     }
                 }

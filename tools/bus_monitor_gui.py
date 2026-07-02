@@ -42,6 +42,8 @@ from bus_monitor import (
     SVC_FIRE_START_EXTINGUISHMENT,
     START_EXT_DELAY_FROM_CMD,
     START_EXT_DELAY_MODULE_ONLY,
+    MKU_DEVICE_TYPES,
+    apply_mku_factory_defaults_all,
     IGNITER_STATUS,
     IGNITER_LINE,
 )
@@ -165,6 +167,7 @@ class BusMonitorGUI:
         self.relay_mode_var = StringVar(value=self.relay_mode_options[0])
         self.relay_initial_state_var = StringVar(value="0")
         self.relay_persist_state_var = StringVar(value="0")
+        self.relay_feedback_inverted_var = StringVar(value="0")
         self.button_h_var = StringVar(value="1")
         self.button_l_var = StringVar(value="1")
         self.button_mode_options = (
@@ -267,6 +270,7 @@ class BusMonitorGUI:
         Button(conn_frame, text="Сохранить МКУ", command=self._send_ppky_save_system_state).pack(side=LEFT, padx=(8, 0))
         # Применить конфиг-образ ППКУ ко всем МКУ (команда 15)
         Button(conn_frame, text="Применить конфиг", command=self._send_ppky_apply_config_image).pack(side=LEFT, padx=(4, 0))
+        Button(conn_frame, text="Дефолты МКУ", command=self._apply_mku_defaults_all).pack(side=LEFT, padx=(4, 0))
         # Софт/хард ресет устройств на шине (команда 12, параметр 0/1)
         Button(conn_frame, text="Soft reset", command=self._send_ppky_soft_reset).pack(side=LEFT, padx=(8, 0))
         Button(conn_frame, text="Hard reset", command=self._send_ppky_hard_reset).pack(side=LEFT, padx=(4, 0))
@@ -389,7 +393,17 @@ class BusMonitorGUI:
             width=2,
         )
         self.relay_persist_state_combo.pack(side=LEFT, padx=(0, 4))
-        Button(relay_frame, text="Set persist", command=self._send_relay_persist_state).pack(side=LEFT, padx=(2, 0))
+        Button(relay_frame, text="Set persist", command=self._send_relay_persist_state).pack(side=LEFT, padx=(2, 6))
+        Label(relay_frame, text="inv ОС").pack(side=LEFT, padx=(0, 2))
+        self.relay_feedback_inverted_combo = ttk.Combobox(
+            relay_frame,
+            textvariable=self.relay_feedback_inverted_var,
+            values=("0", "1"),
+            width=3,
+            state="readonly",
+        )
+        self.relay_feedback_inverted_combo.pack(side=LEFT, padx=(0, 4))
+        Button(relay_frame, text="Set inv", command=self._send_relay_feedback_inverted).pack(side=LEFT, padx=(2, 0))
 
         # --- Панель кнопки ---
         button_frame = Frame(main)
@@ -1376,6 +1390,30 @@ class BusMonitorGUI:
         else:
             self.msg_queue.put({"log": f">> Реле (h={h}, l={l}, zone={zone}) persist={val} (cmd=13)"})
 
+    def _send_relay_feedback_inverted(self):
+        """Установить инверсию обратной связи реле (cmd=14, val=0/1)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._relay_addr_with_zone()
+        if addr is None:
+            return
+        h, l, zone, used_fallback = addr
+        val = 1 if (self.relay_feedback_inverted_var.get() or "0").strip() == "1" else 0
+        can_id = build_can_id(17, h, l, zone, 0)
+        data = bytes([14, val]) + b"\x00" * 6
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "RelaySetFeedbackInv"):
+            return
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Реле (h={h}, l={l}) feedback_inverted={val}, zone=0 (fallback) (cmd=14)"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> Реле (h={h}, l={l}, zone={zone}) feedback_inverted={val} (cmd=14)"
+            })
+
     def _button_addr_with_zone(self) -> tuple[int, int, int, bool] | None:
         try:
             h = int(self.button_h_var.get() or "1")
@@ -1739,6 +1777,82 @@ class BusMonitorGUI:
         data = bytes([15]) + b"\x00" * 7
         self._send_ppky_cmd_broadcast(data, "PPKY ApplyConfigImage (cmd=15)")
 
+    def _discover_active_mkus(self) -> list[tuple[int, int, int, int]]:
+        """Список активных МКУ по последним статусам: (d_type, h_adr, l_adr, zone)."""
+        now = time.time()
+        found: dict[tuple[int, int, int, int], float] = {}
+        for (dt, ha, la, zn, _cmd_key), (_, last_seen) in self.device_statuses.items():
+            if dt not in MKU_DEVICE_TYPES:
+                continue
+            if now - last_seen > self.status_idle_timeout:
+                continue
+            key = (dt, ha, la, zn)
+            prev = found.get(key, 0.0)
+            if last_seen > prev:
+                found[key] = last_seen
+        return sorted(found.keys())
+
+    def _apply_mku_defaults_all(self):
+        """Записать DefaultConfig() прошивки во все МКУ (сохраняется только UId)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+
+        mku_list = self._discover_active_mkus()
+        if not mku_list:
+            self.msg_queue.put({
+                "log": "[!] Нет активных МКУ в статусах. Дождитесь heartbeat (cmd=0) и повторите."
+            })
+            return
+
+        names = ", ".join(
+            f"{DEVICE_NAMES.get(dt, f't{dt}')} h={h} l={l} z={z}"
+            for dt, h, l, z in mku_list
+        )
+        self.msg_queue.put({"log": f"[*] Дефолты МКУ: {len(mku_list)} шт. → {names}"})
+        self.connect_btn.config(state=DISABLED)
+
+        def progress_cb(i: int, total: int, mku: tuple[int, int, int, int]):
+            dt, h, l, z = mku
+            dev = DEVICE_NAMES.get(dt, f"type{dt}")
+            pct = ((i + 1) * 100) // total if total else 100
+            self.msg_queue.put({
+                "log": f"[*] Дефолты МКУ: {pct}% ({i + 1}/{total}) {dev} h={h} l={l} z={z}..."
+            })
+
+        def do_apply():
+            ok = 0
+            total = 0
+            try:
+                self.reader_stop.set()
+                if self.reader_thread:
+                    self.reader_thread.join(timeout=1.0)
+                if self.ser and self.ser.is_open and not self._is_wifi_transport():
+                    try:
+                        self.ser.reset_input_buffer()
+                    except Exception:
+                        pass
+                cfg_parser = BSUParser(be_id=False)
+                with self._serial_lock:
+                    ok, total = apply_mku_factory_defaults_all(
+                        self.ser,
+                        cfg_parser,
+                        mku_list,
+                        transport_hint=("wifi" if self._is_wifi_transport() else "usb"),
+                        mku_progress_callback=progress_cb,
+                    )
+            except Exception as e:
+                self.msg_queue.put({"log": f"[!] Дефолты МКУ failed: {e}"})
+            finally:
+                self.reader_stop.clear()
+                if self.ser and self.ser.is_open:
+                    self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+                    self.reader_thread.start()
+                self.msg_queue.put({"log": f"[*] Дефолты МКУ: готово {ok}/{total}"})
+                self.root.after(0, lambda: self.connect_btn.config(state=NORMAL))
+
+        threading.Thread(target=do_apply, daemon=True).start()
+
     def _send_ppky_soft_reset(self):
         """Софт‑ресет устройств на шине через ППКУ (команда 12, параметр 0)."""
         if not self.ser or not self.ser.is_open:
@@ -1934,7 +2048,9 @@ class BusMonitorGUI:
             self.msg_queue.put({"log": f"[*] Конфигурация прочитана: {size} байт за {elapsed:.2f} с"})
         else:
             self.msg_queue.put({"log": f"[*] Конфигурация прочитана: {size} байт"})
-        lines = parse_config_display(cfg_bytes, debug_dump=self.config_debug_var.get())
+        lines = parse_config_display(
+            cfg_bytes, debug_dump=self.config_debug_var.get(), config_size_raw=size
+        )
         self.config_text.config(state=NORMAL)
         self.config_text.delete(1.0, END)
         if elapsed is not None:
