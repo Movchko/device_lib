@@ -193,7 +193,7 @@ void AplyConfig();
 __attribute__((weak)) uint8_t SetUpdateWord(uint32_t num, uint32_t word);                 // записать 4-байтное слово обновления
 __attribute__((weak)) uint8_t GetUpdateWord(uint32_t num, uint32_t *word);                // прочитать записанное слово (для валидации)
 __attribute__((weak)) uint8_t FinishUpdateTransmit(void);                                  // финализация/дозапись, затем перезагрузка
-uint32_t GetAppVersion(void);                                        // версия приложения (4 байта)
+const char *GetAppVersion(void);                                     // версия приложения (строка)
 
 
 

@@ -20,6 +20,8 @@
 
 #define TRY_24V_SHORT_MS 5000
 
+#define DPT_MAX_SETTLE_TIME_MS 2000
+
 #define DT_TEMPERATURE_WARNING_LIMIT 10 // в процентах
 
 enum DeviceDPTStatus {
@@ -113,6 +115,11 @@ class VDeviceDPT: public VDevice {
 
 	uint8_t was_fire; // был пожар
 
+	/* Фактическое положение реле: 0 — измерение R (24В), 1 — MAX (24В снято) */
+	uint8_t relayInMaxMode;
+
+	void SwitchRelayToMaxMode();
+	void SwitchRelayToResMode();
 	void UpdateLineStateInstant();
 	void UpdateLineStateFiltered();
 protected:

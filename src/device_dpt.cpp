@@ -32,6 +32,7 @@ VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
 	probeAfterShort = 0;
 	probeTimerMs = 0;
 	was_fire = 0;
+	relayInMaxMode = 0;
 	Num = ChNum;
 }
 
@@ -84,6 +85,7 @@ void VDeviceDPT::Init() {
 	maxSettleMs = 0;
 	probeAfterShort = 0;
 	probeTimerMs = 0;
+	relayInMaxMode = 0;
 	UpdateStatus(DeviceDPTStatus_Idle);
 }
 
@@ -138,6 +140,26 @@ void VDeviceDPT::CommandCB(uint8_t Command, uint8_t *Parameters) {
 		default: {
 			/* Неизвестная команда - игнорируем */
 		} break;
+	}
+}
+
+void VDeviceDPT::SwitchRelayToMaxMode() {
+	if (relayInMaxMode) {
+		return;
+	}
+	relayInMaxMode = 1u;
+	if (DPT_SetMaxMeasureMode) {
+		DPT_SetMaxMeasureMode();
+	}
+}
+
+void VDeviceDPT::SwitchRelayToResMode() {
+	if (!relayInMaxMode) {
+		return;
+	}
+	relayInMaxMode = 0u;
+	if (DPT_SetResMeasureMode) {
+		DPT_SetResMeasureMode();
 	}
 }
 
@@ -230,12 +252,7 @@ void VDeviceDPT::Timer1ms() {
         if (prevLineState == DeviceDPTLineState_Short) {
             /* Первый вход в КЗ — сразу снимаем 24В */
             if (maxRetryTimerMs == 0) {
-                if (DPT_SetMaxMeasureMode) {
-                    /* Используем как "24В OFF".
-                     * Если хочешь без щёлкания реле — скорректируй реализацию App_DPT_SetMaxMeasureMode.
-                     */
-                    DPT_SetMaxMeasureMode();
-                }
+                SwitchRelayToMaxMode();
             }
 
             if (maxRetryTimerMs < TRY_24V_SHORT_MS) {
@@ -243,11 +260,9 @@ void VDeviceDPT::Timer1ms() {
             } else {
                 /* Каждые 3 секунды пробуем снова подать 24В и измерить сопротивление */
                 maxRetryTimerMs = 0;
-                if (DPT_SetResMeasureMode) {
-                    probeAfterShort = 1;
-                    probeTimerMs = 0;
-                    DPT_SetResMeasureMode();  // кратко включаем 24В, измерение дальше по ADC
-                }
+                probeAfterShort = 1;
+                probeTimerMs = 0;
+                SwitchRelayToResMode();
             }
         } else {
             maxRetryTimerMs = 0;
@@ -263,16 +278,12 @@ void VDeviceDPT::Timer1ms() {
             measureModeIsMax = 1;
             maxRetryTimerMs = 0;
             maxSettleMs = 0;
-            if (DPT_SetMaxMeasureMode) {
-                /* 24В OFF, реле на MAX */
-                DPT_SetMaxMeasureMode();
-            }
+            SwitchRelayToMaxMode();
         }
 
         if (measureModeIsMax) {
             /* Дать MAX стабилизироваться после переключения реле */
-            const uint16_t MAX_SETTLE_TIME_MS = 2000;
-            if (maxSettleMs < MAX_SETTLE_TIME_MS) {
+            if (maxSettleMs < DPT_MAX_SETTLE_TIME_MS) {
                 maxSettleMs++;
                 /* Пока MAX не устаканился — не выходим из режима MAX,
                  * считаем, что линия по-прежнему в состоянии КЗ.
@@ -287,9 +298,7 @@ void VDeviceDPT::Timer1ms() {
                 measureModeIsMax = 0;
                 maxRetryTimerMs = 0;
                 maxSettleMs = 0;
-                if (DPT_SetResMeasureMode) {
-                    DPT_SetResMeasureMode();  // вернуть 24В и измерение сопротивления
-                }
+                SwitchRelayToResMode();
             } else {
                 /* Линия по-прежнему считается КЗ → раз в 3 с пробуем включить 24В и померить R */
                 if (maxRetryTimerMs < TRY_24V_SHORT_MS) {
@@ -300,9 +309,7 @@ void VDeviceDPT::Timer1ms() {
                     measureModeIsMax = 0;
                     probeAfterShort = 1;
                     probeTimerMs = 0;
-                    if (DPT_SetResMeasureMode) {
-                        DPT_SetResMeasureMode(); // 24В ON, реле на сопротивление
-                    }
+                    SwitchRelayToResMode();
                     /* После этого ADC обновится, UpdateLineStateFiltered опять даст либо Short, либо другое состояние;
                      * при повторном устойчивом КЗ снова войдём в блок выше и вернёмся к MAX.
                      */
@@ -394,15 +401,14 @@ void VDeviceDPT::UpdateLineStateFiltered() {
 			if (pendingTimeMs >= state_change_delay_ms) {
 				prevLineState = candidate;
 				LineState = candidate;
-				if (useMax && measureModeIsMax && candidate != DeviceDPTLineState_Short) {
+				if (useMax && measureModeIsMax && candidate != DeviceDPTLineState_Short &&
+				    maxSettleMs >= DPT_MAX_SETTLE_TIME_MS) {
 					measureModeIsMax = 0;
 					maxRetryTimerMs = 0;
 					maxSettleMs = 0;
 					probeAfterShort = 0;
 					probeTimerMs = 0;
-					if (DPT_SetResMeasureMode) {
-						DPT_SetResMeasureMode();
-					}
+					SwitchRelayToResMode();
 				}
 				SetStatus();
 			}
