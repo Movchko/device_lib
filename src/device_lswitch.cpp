@@ -40,7 +40,7 @@ void VDeviceLimitSwitch::Init() {
 
 	triggerDelayS = LimitCfg->trigger_delay_s;
 	if (LimitCfg->function >= DeviceLimitSwitchFunction_SetFault &&
-		LimitCfg->function <= DeviceLimitSwitchFunction_PauseStart) {
+		LimitCfg->function <= DeviceLimitSwitchFunction_OpenStatus) {
 		functionMode = LimitCfg->function;
 	}
 	normalClosed = LimitCfg->normal_closed ? 1u : 0u;
@@ -51,6 +51,10 @@ void VDeviceLimitSwitch::OnPressEdge(void) {
 }
 
 DeviceDPTLineState VDeviceLimitSwitch::GetTriggeredLineState() const {
+	/* OpenStatus и прочие режимы без fault — только "Открытие" (Press). */
+	if (functionMode == DeviceLimitSwitchFunction_OpenStatus) {
+		return DeviceDPTLineState_Press;
+	}
 	/* Для функции "неисправность" Fault поднимаем только после trigger_delay_s. */
 	if (functionMode == DeviceLimitSwitchFunction_SetFault && faultOutputArmed) {
 		return DeviceDPTLineState_Fault;
@@ -66,7 +70,7 @@ uint8_t VDeviceLimitSwitch::IsRawTriggeredNow() const {
 
 void VDeviceLimitSwitch::SendPpkuModeCommand(uint8_t mode) const {
 	/* Нестандартная прикладная команда ППКУ в блоке CommandCB:
-	 * cmd=13, param[0]=0(auto) / 1(manual). dir=0 обязателен, иначе non-service
+	 * cmd=13, param[0]=0(auto) / 2(manual). dir=0 обязателен, иначе non-service
 	 * ветка ProtocolParse не вызовет CommandCB на получателе.
 	 */
 	can_ext_id_t can_id;
@@ -75,7 +79,7 @@ void VDeviceLimitSwitch::SendPpkuModeCommand(uint8_t mode) const {
 	can_id.field.h_adr = 0u;
 	can_id.field.l_adr = 0u;
 	can_id.field.d_type = DEVICE_PPKY_TYPE;
-	can_id.field.dir = 1u;
+	can_id.field.dir = 0u;
 
 	uint8_t data[8] = {0u};
 	data[0] = 13u;
@@ -96,7 +100,7 @@ void VDeviceLimitSwitch::HandleActiveTransition(uint8_t active_now) {
 			break;
 
 		case DeviceLimitSwitchFunction_SetManual:
-			SendPpkuModeCommand(1u);
+			SendPpkuModeCommand(2u);
 			break;
 
 		case DeviceLimitSwitchFunction_SetAuto:
@@ -108,6 +112,10 @@ void VDeviceLimitSwitch::HandleActiveTransition(uint8_t active_now) {
 				SetPauseExtinguishmentTimer(Num);
 				pauseSent = 1u;
 			}
+			break;
+
+		case DeviceLimitSwitchFunction_OpenStatus:
+			/* Только статус line_state=Press (Открытие), без побочных действий. */
 			break;
 
 		default:
@@ -169,7 +177,7 @@ void VDeviceLimitSwitch::CommandCB(uint8_t Command, uint8_t *Parameters) {
 	} break;
 
 	case 16: {
-		/* function mode: 1..4 */
+		/* function mode: 1..5 */
 		if (Parameters[0] >= DeviceLimitSwitchFunction_SetFault &&
 			Parameters[0] <= DeviceLimitSwitchFunction_OpenStatus) {
 			LimitCfg->function = Parameters[0];

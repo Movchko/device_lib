@@ -42,6 +42,27 @@ static void VDeviceButton_SendStartExtinguishment(uint8_t zone,
 	VDeviceButton_OnStartExtinguishment(zone, zone_delay_s, module_delay_s, launch_type);
 }
 
+static void VDeviceButton_SendStatusFire(uint8_t l_adr, uint8_t zone)
+{
+	can_ext_id_t can_id;
+	uint8_t data[8] = {
+		ServiceCmd_Fire_SetStatusFire,
+		DEVICE_BUTTON_TYPE,
+		l_adr,
+		zone,
+		0u, 0u, 0u, 0u
+	};
+
+	can_id.ID = 0u;
+	can_id.field.dir = 1u;
+	can_id.field.d_type = 0u;
+	can_id.field.h_adr = 0u;
+	can_id.field.l_adr = 0u;
+	can_id.field.zone = zone & 0x7Fu;
+
+	SendMessageFull(can_id, data, SEND_NOW, BUS_CAN12);
+}
+
 static void VDeviceButton_SendStartSpButton(void)
 {
 	can_ext_id_t can_id;
@@ -96,7 +117,7 @@ void VDeviceButton::Init() {
 		return;
 	}
 
-	if (ButtonCfg->button_kind <= DeviceButtonKind_StartZone) {
+	if (ButtonCfg->button_kind <= DeviceButtonKind_FireZone) {
 		ButtonKind = static_cast<DeviceButtonKind>(ButtonCfg->button_kind);
 	}
 	normalClosed = ButtonCfg->normal_closed ? 1u : 0u;
@@ -126,6 +147,21 @@ void VDeviceButton::OnPressEdge(void) {
 			VDeviceButton_SendStartExtinguishment(zone, 0u, 0u, START_EXT_DELAY_MODULE_ONLY);
 		}
 		break;
+
+	case DeviceButtonKind_FireAll:
+		/* Пожар всех зон: broadcast SetStatusFire (140), как ДПТ на K1. */
+		VDeviceButton_SendStatusFire(Num, 0u);
+		break;
+
+	case DeviceButtonKind_FireZone:
+		for (uint8_t i = 0; i < sizeof(ZonesToStart); i++) {
+			uint8_t zone = ZonesToStart[i];
+			if (zone == 0u) {
+				continue;
+			}
+			VDeviceButton_SendStatusFire(Num, zone);
+		}
+		break;
 	}
 }
 
@@ -145,8 +181,8 @@ void VDeviceButton::CommandCB(uint8_t Command, uint8_t *Parameters) {
 
 	switch (Command) {
 	case 15: {
-		/* Вид кнопки: 0=StartSP, 1=StartAll, 2=StartZone */
-		if ((ButtonCfg != nullptr) && (Parameters != nullptr) && (Parameters[0] <= DeviceButtonKind_StartZone)) {
+		/* Вид кнопки: 0=StartSP, 1=StartAll, 2=StartZone, 3=FireAll, 4=FireZone */
+		if ((ButtonCfg != nullptr) && (Parameters != nullptr) && (Parameters[0] <= DeviceButtonKind_FireZone)) {
 			ButtonCfg->button_kind = Parameters[0];
 			ButtonKind = static_cast<DeviceButtonKind>(Parameters[0]);
 			if (VDeviceSaveCfg != nullptr) {
@@ -156,7 +192,7 @@ void VDeviceButton::CommandCB(uint8_t Command, uint8_t *Parameters) {
 	} break;
 
 	case 16: {
-		/* Список зон (7 байт) для режима StartZone. */
+		/* Список зон (7 байт) для режимов StartZone / FireZone. */
 		if ((ButtonCfg != nullptr) && (Parameters != nullptr)) {
 			memcpy(ButtonCfg->zones, Parameters, sizeof(ZonesToStart));
 			memcpy(ZonesToStart, Parameters, sizeof(ZonesToStart));

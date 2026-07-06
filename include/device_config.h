@@ -107,7 +107,9 @@ typedef struct DeviceDPTConfig {
 typedef enum DeviceButtonKind {
     DeviceButtonKind_StartSP   = 0, /* имитация нажатия ПУСК СП на ППКУ (через callback из app) */
     DeviceButtonKind_StartAll  = 1, /* широковещательный StartExtinguishment, zone=0 */
-    DeviceButtonKind_StartZone = 2  /* запуск зон из массива zones[7] */
+    DeviceButtonKind_StartZone = 2, /* запуск тушения зон из массива zones[7] */
+    DeviceButtonKind_FireAll   = 3, /* пожар всех зон (SetStatusFire, zone=0) */
+    DeviceButtonKind_FireZone  = 4  /* пожар зон из массива zones[7] */
 } DeviceButtonKind;
 
 typedef struct DeviceButtonConfig {
@@ -143,7 +145,7 @@ typedef struct DeviceIgniterConfig {
 	uint16_t threshold_break_low;   /* мВ, граница перехода из "КЗ" в "Норма" */
 	uint16_t threshold_break_high;  /* мВ, граница перехода в "обрыв" */
 
-	/* Количество повторных циклов прожига при отсутствии обрыва (0 или 1). По умолчанию 1 */
+	/* Количество повторных циклов прожига при отсутствии обрыва По умолчанию 0 */
 	uint8_t burn_retry_count;
 
 	/* резерв до полного размера VDeviceCfg::reserv (64 байта).

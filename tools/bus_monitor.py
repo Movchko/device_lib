@@ -1455,7 +1455,13 @@ def _u32_le_buf(b: bytes, off: int) -> int:
 
 
 def _button_kind_name(kind: int) -> str:
-    names = ("ПУСК СП", "пуск всех зон", "пуск по списку зон")
+    names = (
+        "ПУСК СП",
+        "пуск всех зон",
+        "пуск по списку зон",
+        "пожар всех зон",
+        "пожар по списку зон",
+    )
     return names[kind] if 0 <= kind < len(names) else str(kind)
 
 
