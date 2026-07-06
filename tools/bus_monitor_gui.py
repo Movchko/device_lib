@@ -189,6 +189,7 @@ class BusMonitorGUI:
             "2 - ручной режим ППКУ",
             "3 - автоматический режим ППКУ",
             "4 - пауза пуска",
+            "5 - открытие",
         )
         self.lswitch_function_var = StringVar(value=self.lswitch_function_options[0])
         self.lswitch_trigger_delay_var = StringVar(value="0")
@@ -1584,7 +1585,7 @@ class BusMonitorGUI:
             })
 
     def _send_lswitch_function(self):
-        """Установить функцию концевика (cmd=16, val=1..4)."""
+        """Установить функцию концевика (cmd=16, val=1..5)."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
@@ -1599,8 +1600,8 @@ class BusMonitorGUI:
             func = 1
         if func < 1:
             func = 1
-        if func > 4:
-            func = 4
+        if func > 5:
+            func = 5
         can_id = build_can_id(16, h, l, zone, 0)
         data = bytes([16, func]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)

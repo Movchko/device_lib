@@ -194,7 +194,8 @@ typedef enum DeviceLimitSwitchFunction {
 	DeviceLimitSwitchFunction_SetFault = 1,   /* выставить статус "неисправность" */
 	DeviceLimitSwitchFunction_SetManual = 2,  /* перевести ППКУ в ручной режим */
 	DeviceLimitSwitchFunction_SetAuto = 3,    /* перевести ППКУ в автоматический режим */
-	DeviceLimitSwitchFunction_PauseStart = 4  /* пауза пуска (до отпускания) */
+	DeviceLimitSwitchFunction_PauseStart = 4,  /* пауза пуска (до отпускания) */
+	DeviceLimitSwitchFunction_OpenStatus = 5  /* открытие*/
 } DeviceLimitSwitchFunction;
 
 typedef struct DeviceLimitSwitchConfig {

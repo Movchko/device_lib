@@ -171,12 +171,7 @@ void VDeviceLimitSwitch::CommandCB(uint8_t Command, uint8_t *Parameters) {
 	case 16: {
 		/* function mode: 1..4 */
 		if (Parameters[0] >= DeviceLimitSwitchFunction_SetFault &&
-			Parameters[0] <= DeviceLimitSwitchFunction_PauseStart) {
-			if (functionMode == DeviceLimitSwitchFunction_PauseStart && pauseSent &&
-				Parameters[0] != DeviceLimitSwitchFunction_PauseStart) {
-				SetResumeExtinguishmentTimer(0u);
-				pauseSent = 0u;
-			}
+			Parameters[0] <= DeviceLimitSwitchFunction_OpenStatus) {
 			LimitCfg->function = Parameters[0];
 			functionMode = Parameters[0];
 			faultOutputArmed = 0u;

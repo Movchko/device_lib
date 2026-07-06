@@ -1465,6 +1465,7 @@ def _lswitch_function_name(func: int) -> str:
         2: "ручной ППКУ",
         3: "авто ППКУ",
         4: "пауза пуска",
+        5: "открытие",
     }
     return names.get(func, str(func))
 
