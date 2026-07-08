@@ -104,6 +104,11 @@ enum ServiceCmd {
 #define START_EXT_DELAY_MODULE_ONLY      1u /* zone_delay=0, module_delay из MKUCfg */
 #define START_EXT_DELAY_ZONE_AND_MODULE  2u /* обе задержки из MKUCfg */
 
+/* Источник SetStatusFire (140): байт data[4] CAN-кадра (payload после cmd). */
+#define FIRE_STATUS_SRC_SENSOR           0u /* датчик / кнопка FireAll/FireZone */
+#define FIRE_STATUS_SRC_BUTTON_EXT       1u /* внешняя кнопка StartAll/StartZone */
+#define FIRE_STATUS_SRC_PPKU_START_ALL   2u /* ППКУ: ПУСК ОБЩИЙ */
+
 
 // bus - битовая маска - номер шины (0b01 - CAN 0, 0b10 - CAN 1)
 void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t bus, uint8_t dir);
@@ -139,6 +144,9 @@ void SetConfigPtr(uint8_t *SConfigPtr, uint8_t *LConfigPtr);
 uint8_t GetRetranslate(); // вернуть флаг разрешена ли ретрансляция сообщений
 
 void SetStatusFire(uint8_t *Data);
+/* Широковещательный SetStatusFire: zone=0 — все зоны. source — FIRE_STATUS_SRC_*. */
+void BroadcastSetStatusFire(uint8_t zone_can, uint8_t source, uint8_t origin_d_type, uint8_t origin_l_adr);
+uint8_t FireStatus_IsSensorSource(uint8_t source);
 void SetReplyStatusFire(uint8_t zone);
 void SetStartExtinguishment(uint8_t zone, uint8_t zone_delay, uint8_t module_delay, uint8_t type);
 void SetReplyStartExtinguishment(uint8_t dev);

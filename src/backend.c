@@ -656,6 +656,33 @@ void SetStatusFire(uint8_t *Data) {
 	SendMessage(0, ServiceCmd_Fire_SetStatusFire, Data, 1, BUS_CAN12);
 }
 
+uint8_t FireStatus_IsSensorSource(uint8_t source)
+{
+	return (source == FIRE_STATUS_SRC_SENSOR) ? 1u : 0u;
+}
+
+void BroadcastSetStatusFire(uint8_t zone_can, uint8_t source, uint8_t origin_d_type, uint8_t origin_l_adr)
+{
+	can_ext_id_t can_id;
+	uint8_t data[8] = {
+		ServiceCmd_Fire_SetStatusFire,
+		origin_d_type,
+		origin_l_adr,
+		zone_can,
+		source,
+		0u, 0u, 0u
+	};
+
+	can_id.ID = 0u;
+	can_id.field.dir = 1u;
+	can_id.field.d_type = 0u;
+	can_id.field.h_adr = 0u;
+	can_id.field.l_adr = 0u;
+	can_id.field.zone = zone_can & 0x7Fu;
+
+	SendMessageFull(can_id, data, SEND_NOW, BUS_CAN12);
+}
+
 void SetReplyStatusFire(uint8_t zone) {
 	uint8_t Data[7] = {zone, 0, 0, 0, 0, 0, 0};
 	SendMessage(0, ServiceCmd_Fire_ReplyStatusFire, Data, 1, BUS_CAN12);

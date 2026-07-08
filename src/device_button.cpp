@@ -42,7 +42,7 @@ static void VDeviceButton_SendStartExtinguishment(uint8_t zone,
 	VDeviceButton_OnStartExtinguishment(zone, zone_delay_s, module_delay_s, launch_type);
 }
 
-static void VDeviceButton_SendStatusFire(uint8_t l_adr, uint8_t zone)
+static void VDeviceButton_SendStatusFire(uint8_t l_adr, uint8_t zone, uint8_t source)
 {
 	can_ext_id_t can_id;
 	uint8_t data[8] = {
@@ -50,7 +50,8 @@ static void VDeviceButton_SendStatusFire(uint8_t l_adr, uint8_t zone)
 		DEVICE_BUTTON_TYPE,
 		l_adr,
 		zone,
-		0u, 0u, 0u, 0u
+		source,
+		0u, 0u, 0u
 	};
 
 	can_id.ID = 0u;
@@ -134,7 +135,8 @@ void VDeviceButton::OnPressEdge(void) {
 		break;
 
 	case DeviceButtonKind_StartAll:
-		/* Пуск всех зон: внутренняя задержка модуля (как ПУСК ОБЩИЙ на ППКУ). */
+		/* Пуск всех зон: сначала логический пожар для реле, затем тушение. */
+		VDeviceButton_SendStatusFire(Num, 0u, FIRE_STATUS_SRC_BUTTON_EXT);
 		VDeviceButton_SendStartExtinguishment(0u, 0u, 0u, START_EXT_DELAY_MODULE_ONLY);
 		break;
 
@@ -144,13 +146,14 @@ void VDeviceButton::OnPressEdge(void) {
 			if (zone == 0u) {
 				continue;
 			}
+			VDeviceButton_SendStatusFire(Num, zone, FIRE_STATUS_SRC_BUTTON_EXT);
 			VDeviceButton_SendStartExtinguishment(zone, 0u, 0u, START_EXT_DELAY_MODULE_ONLY);
 		}
 		break;
 
 	case DeviceButtonKind_FireAll:
 		/* Пожар всех зон: broadcast SetStatusFire (140), как ДПТ на K1. */
-		VDeviceButton_SendStatusFire(Num, 0u);
+		VDeviceButton_SendStatusFire(Num, 0u, FIRE_STATUS_SRC_SENSOR);
 		break;
 
 	case DeviceButtonKind_FireZone:
@@ -159,7 +162,7 @@ void VDeviceButton::OnPressEdge(void) {
 			if (zone == 0u) {
 				continue;
 			}
-			VDeviceButton_SendStatusFire(Num, zone);
+			VDeviceButton_SendStatusFire(Num, zone, FIRE_STATUS_SRC_SENSOR);
 		}
 		break;
 	}
