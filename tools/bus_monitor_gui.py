@@ -13,8 +13,8 @@ import time
 import socket
 from datetime import datetime
 from tkinter import (
-    Tk, ttk, Frame, Label, Button, Entry, Text, Scrollbar,
-    StringVar, BooleanVar, END, DISABLED, NORMAL, BOTH, X, Y, RIGHT, LEFT
+    Tk, ttk, Frame, Label, Button, Entry, Text, Scrollbar, Menu,
+    StringVar, BooleanVar, END, DISABLED, NORMAL, BOTH, X, Y, RIGHT, LEFT,
 )
 
 try:
@@ -23,6 +23,69 @@ try:
 except ImportError:
     print("Установите pyserial: pip install pyserial")
     sys.exit(1)
+
+
+def _copy_text_widget(widget: Text, all_text: bool = False) -> bool:
+    """Скопировать выделение или весь текст в буфер обмена."""
+    if all_text:
+        text = widget.get("1.0", "end-1c")
+    elif widget.tag_ranges("sel"):
+        text = widget.get("sel.first", "sel.last")
+    else:
+        text = widget.get("1.0", "end-1c")
+    if not text:
+        return False
+    widget.clipboard_clear()
+    widget.clipboard_append(text)
+    widget.update_idletasks()
+    return True
+
+
+def _bind_readonly_text(widget: Text) -> None:
+    """Выделение и копирование без редактирования (Windows/Linux)."""
+    def select_all(_event=None):
+        widget.tag_remove("sel", "1.0", "end")
+        widget.tag_add("sel", "1.0", "end-1c")
+        widget.mark_set("insert", "end-1c")
+        return "break"
+
+    def copy_shortcut(_event=None):
+        _copy_text_widget(widget, all_text=False)
+        return "break"
+
+    def block_typing(event):
+        if event.char and event.char.isprintable():
+            return "break"
+        return None
+
+    menu = Menu(widget, tearoff=0)
+    menu.add_command(label="Копировать", command=lambda: _copy_text_widget(widget, False))
+    menu.add_command(label="Копировать всё", command=lambda: _copy_text_widget(widget, True))
+    menu.add_command(label="Выделить всё", command=select_all)
+
+    def show_menu(event):
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    widget.config(exportselection=True)
+    widget.bind("<Control-a>", select_all)
+    widget.bind("<Control-A>", select_all)
+    widget.bind("<Control-c>", copy_shortcut)
+    widget.bind("<Control-C>", copy_shortcut)
+    widget.bind("<Control-Insert>", copy_shortcut)
+    widget.bind("<KeyPress>", block_typing)
+    widget.bind("<<Paste>>", lambda _e: "break")
+    widget.bind("<Button-3>", show_menu)
+
+
+def _set_readonly_text(widget: Text, content: str) -> None:
+    widget.config(state=NORMAL)
+    widget.delete("1.0", END)
+    if content:
+        widget.insert(END, content)
+
 
 # Импорт протокола из bus_monitor
 from bus_monitor import (
@@ -174,6 +237,8 @@ class BusMonitorGUI:
             "0 - ПУСК СП",
             "1 - Пуск всех зон",
             "2 - Пуск по списку зон",
+            "3 - Пожар всех зон",
+            "4 - Пожар по списку зон",
         )
         self.button_mode_var = StringVar(value=self.button_mode_options[0])
         self.button_zones_var = StringVar(value="1")
@@ -512,7 +577,9 @@ class BusMonitorGUI:
         Label(cfg_header, text="Конфигурация (заданные поля):").pack(side=LEFT)
         self.config_debug_var = BooleanVar(value=False)
         ttk.Checkbutton(cfg_header, text="Дамп hex (отладка)", variable=self.config_debug_var).pack(side=LEFT, padx=(16, 0))
-        self.config_text = Text(config_frame, wrap="word", font=("Consolas", 9), height=8, state=DISABLED)
+        Button(cfg_header, text="Копировать всё", command=self._copy_config_text).pack(side=LEFT, padx=(8, 0))
+        self.config_text = Text(config_frame, wrap="word", font=("Consolas", 9), height=8)
+        _bind_readonly_text(self.config_text)
         config_scroll = Scrollbar(config_frame, command=self.config_text.yview)
         self.config_text.pack(side=LEFT, fill=X, expand=True)
         config_scroll.pack(side=RIGHT, fill=Y)
@@ -712,10 +779,10 @@ class BusMonitorGUI:
                         self.cfg_crc_local_var.set(f"0x{crc:08X}")
                     elif "config_progress" in item:
                         pct, current, total = item["config_progress"]
-                        self.config_text.config(state=NORMAL)
-                        self.config_text.delete(1.0, END)
-                        self.config_text.insert(END, f"Чтение конфигурации: {pct}% ({current}/{total} слов)")
-                        self.config_text.config(state=DISABLED)
+                        _set_readonly_text(
+                            self.config_text,
+                            f"Чтение конфигурации: {pct}% ({current}/{total} слов)",
+                        )
                     elif "config_result" in item:
                         cfg_bytes, size = item["config_result"]
                         self._apply_config_result(cfg_bytes, size)
@@ -1430,7 +1497,7 @@ class BusMonitorGUI:
         return h, l, zone, used_fallback
 
     def _send_button_mode(self):
-        """Установить вид кнопки (cmd=15, val=0..2)."""
+        """Установить вид кнопки (cmd=15, val=0..4)."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
@@ -1445,8 +1512,8 @@ class BusMonitorGUI:
             mode = 0
         if mode < 0:
             mode = 0
-        if mode > 2:
-            mode = 2
+        if mode > 4:
+            mode = 4
         can_id = build_can_id(15, h, l, zone, 0)
         data = bytes([15, mode]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)
@@ -1969,10 +2036,7 @@ class BusMonitorGUI:
         })
         self._config_read_started_at = time.time()
         self.connect_btn.config(state=DISABLED)
-        self.config_text.config(state=NORMAL)
-        self.config_text.delete(1.0, END)
-        self.config_text.insert(END, "Чтение конфигурации: 0% (0/0 слов)")
-        self.config_text.config(state=DISABLED)
+        _set_readonly_text(self.config_text, "Чтение конфигурации: 0% (0/0 слов)")
 
         progress_state = {"last_pct": -1, "last_current": -1, "last_ts": 0.0}
 
@@ -2029,6 +2093,13 @@ class BusMonitorGUI:
 
         threading.Thread(target=do_read, daemon=True).start()
 
+    def _copy_config_text(self):
+        """Скопировать всё содержимое поля конфигурации в буфер обмена."""
+        if _copy_text_widget(self.config_text, all_text=True):
+            self.msg_queue.put({"log": "[*] Конфигурация скопирована в буфер обмена"})
+        else:
+            self.msg_queue.put({"log": "[!] Нечего копировать"})
+
     def _apply_config_result(self, cfg_bytes: bytes | None, size: int):
         elapsed = None
         if self._config_read_started_at is not None:
@@ -2037,13 +2108,10 @@ class BusMonitorGUI:
         self.connect_btn.config(state=NORMAL)
         if cfg_bytes is None or size == 0:
             self.msg_queue.put({"log": "[!] Ошибка чтения конфигурации"})
-            self.config_text.config(state=NORMAL)
-            self.config_text.delete(1.0, END)
             if elapsed is not None:
-                self.config_text.insert(END, f"Время чтения: {elapsed:.2f} с\n(ошибка)")
+                _set_readonly_text(self.config_text, f"Время чтения: {elapsed:.2f} с\n(ошибка)")
             else:
-                self.config_text.insert(END, "(ошибка)")
-            self.config_text.config(state=DISABLED)
+                _set_readonly_text(self.config_text, "(ошибка)")
             return
         if elapsed is not None:
             self.msg_queue.put({"log": f"[*] Конфигурация прочитана: {size} байт за {elapsed:.2f} с"})
@@ -2052,15 +2120,14 @@ class BusMonitorGUI:
         lines = parse_config_display(
             cfg_bytes, debug_dump=self.config_debug_var.get(), config_size_raw=size
         )
-        self.config_text.config(state=NORMAL)
-        self.config_text.delete(1.0, END)
+        parts: list[str] = []
         if elapsed is not None:
-            self.config_text.insert(END, f"Время чтения: {elapsed:.2f} с\n")
+            parts.append(f"Время чтения: {elapsed:.2f} с")
         if lines:
-            self.config_text.insert(END, "\n".join(lines))
+            parts.append("\n".join(lines))
         else:
-            self.config_text.insert(END, "(нет заданных полей)")
-        self.config_text.config(state=DISABLED)
+            parts.append("(нет заданных полей)")
+        _set_readonly_text(self.config_text, "\n".join(parts))
 
     def run(self):
         self.root.mainloop()
