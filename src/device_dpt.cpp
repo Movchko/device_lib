@@ -164,8 +164,10 @@ void VDeviceDPT::SwitchRelayToResMode() {
 }
 
 void VDeviceDPT::UpdateStatus(DeviceDPTStatus status) {
-	Status = status;
-	SetStatus();
+	if(Status != status) {
+		Status = status;
+		SetStatus();
+	}
 }
 
 void VDeviceDPT::SetStatus() {
@@ -379,6 +381,7 @@ void VDeviceDPT::UpdateLineStateInstant() {
 		} else if (max_temp_c > static_cast<int16_t>(max_fire_threshold_c)) {
 			LineState = GetTriggeredLineState();
 		} else {
+			UpdateStatus(DeviceDPTStatus_Idle);
 			LineState = DeviceDPTLineState_Short;
 		}
 	}
