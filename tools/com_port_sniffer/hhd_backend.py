@@ -29,11 +29,11 @@ SPMC_DLL_CANDIDATES = (
     r"C:\Program Files (x86)\HHD Software\Serial Port Monitoring Control\bin\x86\hhdspmc.dll",
 )
 
-DMS_DRIVER_PATH = os.path.join(
-    os.environ.get("SystemRoot", r"C:\Windows"),
-    "System32",
-    "drivers",
-    "hhdserial64.sys",
+DRIVER_DIR = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "drivers")
+DRIVER_CANDIDATES = (
+    "hhdserial64.sys",   # legacy Device Monitoring Studio
+    "hhddmsserial.sys",  # Device Monitoring Studio 8+
+    "hhdspmc64.sys",     # Serial Port Monitoring Control
 )
 
 _spmc_module_loaded = False
@@ -56,7 +56,14 @@ class SnifferFrame:
 
 
 def driver_installed() -> bool:
-    return os.path.isfile(DMS_DRIVER_PATH)
+    return any(os.path.isfile(os.path.join(DRIVER_DIR, name)) for name in DRIVER_CANDIDATES)
+
+
+def installed_driver_name() -> Optional[str]:
+    for name in DRIVER_CANDIDATES:
+        if os.path.isfile(os.path.join(DRIVER_DIR, name)):
+            return name
+    return None
 
 
 def find_hhdspmc_dll() -> Optional[str]:
@@ -121,8 +128,8 @@ def spmc_available() -> Tuple[bool, str]:
     if not driver_installed():
         return (
             False,
-            "Драйвер hhdserial64.sys не найден. Установите Device Monitoring Studio "
-            "или SPMC (драйвер ставится вместе с ними).",
+            "Драйвер мониторинга COM-порта не найден. Установите Device Monitoring Studio "
+            "или Serial Port Monitoring Control (драйвер ставится вместе с ними).",
         )
 
     if not find_hhdspmc_dll():

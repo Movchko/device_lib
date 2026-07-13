@@ -13,8 +13,9 @@ import time
 import socket
 from datetime import datetime
 from tkinter import (
-    Tk, ttk, Frame, Label, Button, Entry, Text, Scrollbar, Menu,
+    Tk, Toplevel, ttk, Frame, Label, Button, Entry, Text, Scrollbar, Menu,
     StringVar, BooleanVar, END, DISABLED, NORMAL, BOTH, X, Y, RIGHT, LEFT,
+    messagebox,
 )
 
 try:
@@ -111,6 +112,8 @@ from bus_monitor import (
     IGNITER_LINE,
 )
 
+from ppky_log_stream import BsuLogFrameParser, PpkyLogClient, can_frame_from_bsu_body, build_log_request, LOG_PKT_TYPE_RSP, LOG_PKT_TYPE_DATA
+
 SERVICE_CMD_POSITION_DEVICE = 161
 
 WIFI_DEFAULT_HOST = "192.168.4.1"
@@ -196,7 +199,10 @@ class BusMonitorGUI:
         self._pps_window_started_at = time.time()
         self._pps_packets_in_window = 0
         self._pps_value = 0
-        self.bsu = BSUParser(be_id=False)
+        self.rx_parser = BsuLogFrameParser()
+        self.log_packets: queue.Queue = queue.Queue()
+        self._log_rx_total = 0
+        self._log_window: "PpkyLogWindow | None" = None
 
         self.can_id_req: int | None = None
         self.can_id_rsp: int | None = None
@@ -348,6 +354,7 @@ class BusMonitorGUI:
 
         self.connect_btn = Button(conn_frame, text="Подключить", command=self._toggle_connect)
         self.connect_btn.pack(side=LEFT, padx=(8, 0))
+        Button(conn_frame, text="ЛОГИ", command=self._open_ppky_log_window).pack(side=LEFT, padx=(8, 0))
 
         # --- Кнопки команд ---
         cmd_frame = Frame(main)
@@ -866,7 +873,13 @@ class BusMonitorGUI:
 
             self._update_can_ids()
             # Новый сеанс — новый парсер, чтобы не тащить состояние после прошлой сессии.
-            self.bsu = BSUParser(be_id=False)
+            self.rx_parser = BsuLogFrameParser()
+            while True:
+                try:
+                    self.log_packets.get_nowait()
+                except queue.Empty:
+                    break
+            self._log_rx_total = 0
             self.reader_stop.clear()
             self.device_statuses.clear()
             self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
@@ -883,6 +896,12 @@ class BusMonitorGUI:
         self.reader_stop.set()
         if self.reader_thread:
             self.reader_thread.join(timeout=0.5)
+        if self._log_window is not None:
+            try:
+                if self._log_window.win.winfo_exists():
+                    self._log_window._on_close()
+            except Exception:
+                self._log_window = None
         if self.ser:
             self.ser.close()
             self.ser = None
@@ -897,6 +916,13 @@ class BusMonitorGUI:
 
     def _is_wifi_transport(self) -> bool:
         return isinstance(self.ser, TcpSerialCompat) and self.ser.is_open
+
+    def _open_ppky_log_window(self):
+        if self._log_window is not None and self._log_window.winfo_exists():
+            self._log_window.lift()
+            self._log_window.focus_force()
+            return
+        self._log_window = PpkyLogWindow(self)
 
     def _write_packet(self, pkt: bytes, context: str = "") -> bool:
         if not self.ser or not self.ser.is_open:
@@ -1036,8 +1062,8 @@ class BusMonitorGUI:
                         self.msg_queue.put({"log": f"[!] RX тишина {now - last_rx_ts:.1f}с (TCP/WiFi или конвертер)"})
                     # Защита от "залипания" парсера в промежуточном состоянии:
                     # при длительной тишине сбрасываемся в поиск новой преамбулы.
-                    if (now - last_rx_ts) >= self._rx_silence_reset_s and getattr(self.bsu, "state", "PREAMBLE_0") != "PREAMBLE_0":
-                        self.bsu = BSUParser(be_id=False)
+                    if (now - last_rx_ts) >= self._rx_silence_reset_s and getattr(self.rx_parser, "state", "PREAMBLE_0") != "PREAMBLE_0":
+                        self.rx_parser.reset()
                     time.sleep(0.001)
                     continue
                 if rx_stall_reported:
@@ -1046,33 +1072,44 @@ class BusMonitorGUI:
                     rx_stall_reported = False
                 last_rx_ts = time.time()
                 for b in chunk:
-                    result = self.bsu.feed(b)
-                    if result:
-                        self._pps_packets_in_window += 1
-                        if len(result) >= 2:
-                            can_id, data = result[0], result[1]
-                        else:
-                            continue
-                        self._maybe_auto_h_adr(can_id)
-                        self._maybe_igniter_status(can_id, data)
-                        self._update_device_status(can_id, data)
-                        # Обработка сервисных ответов ППКУ (GetConfigSize / GetConfigCRC)
-                        if is_service_packet(data):
-                            p = parse_can_id(can_id)
-                            if p["d_type"] == DEVICE_PPKY_TYPE and p["dir"] == 1:
-                                cmd = data[0]
-                                if cmd == SVC_GET_CONFIG_SIZE and len(data) >= 5:
-                                    size_bytes = ((data[1] << 24) |
-                                                  (data[2] << 16) |
-                                                  (data[3] << 8)  |
-                                                   data[4])
-                                    self.msg_queue.put({"cfg_size": size_bytes})
-                                elif cmd == SVC_GET_CONFIG_CRC and len(data) >= 5:
-                                    crc = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4]
-                                    if self._last_crc_request == "saved":
-                                        self.msg_queue.put({"cfg_crc_saved": crc})
-                                    elif self._last_crc_request == "local":
-                                        self.msg_queue.put({"cfg_crc_local": crc})
+                    frame = self.rx_parser.feed(b)
+                    if not frame:
+                        continue
+                    pkt_type = frame["type"]
+                    body = frame["body"]
+                    if pkt_type in (LOG_PKT_TYPE_RSP, LOG_PKT_TYPE_DATA):
+                        self.log_packets.put(frame)
+                        self._log_rx_total += 1
+                        continue
+                    if pkt_type not in (0, 1):
+                        continue
+                    parsed_can = can_frame_from_bsu_body(body)
+                    if not parsed_can:
+                        continue
+                    can_id, data, bus_label = parsed_can
+                    if pkt_type == 1:
+                        bus_label = "CAN2"
+                    self._pps_packets_in_window += 1
+                    self._maybe_auto_h_adr(can_id)
+                    self._maybe_igniter_status(can_id, data)
+                    self._update_device_status(can_id, data)
+                    # Обработка сервисных ответов ППКУ (GetConfigSize / GetConfigCRC)
+                    if is_service_packet(data):
+                        p = parse_can_id(can_id)
+                        if p["d_type"] == DEVICE_PPKY_TYPE and p["dir"] == 1:
+                            cmd = data[0]
+                            if cmd == SVC_GET_CONFIG_SIZE and len(data) >= 5:
+                                size_bytes = ((data[1] << 24) |
+                                              (data[2] << 16) |
+                                              (data[3] << 8)  |
+                                               data[4])
+                                self.msg_queue.put({"cfg_size": size_bytes})
+                            elif cmd == SVC_GET_CONFIG_CRC and len(data) >= 5:
+                                crc = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4]
+                                if self._last_crc_request == "saved":
+                                    self.msg_queue.put({"cfg_crc_saved": crc})
+                                elif self._last_crc_request == "local":
+                                    self.msg_queue.put({"cfg_crc_local": crc})
             except (serial.SerialException, OSError):
                 break
             except Exception as e:
@@ -2132,6 +2169,214 @@ class BusMonitorGUI:
     def run(self):
         self.root.mainloop()
         self._disconnect()
+
+
+class PpkyLogWindow:
+    """Окно просмотра логов ППКУ (только WiFi/TCP)."""
+
+    TIER_OPTIONS = (
+        ("Критический", 0),
+        ("Общий", 1),
+        ("Оба", 2),
+    )
+
+    def __init__(self, app: BusMonitorGUI):
+        self.app = app
+        self.stop_event = threading.Event()
+        self.dump_thread: threading.Thread | None = None
+        self.text_queue: queue.Queue = queue.Queue()
+
+        self.win = Toplevel(app.root)
+        self.win.title("Логи ППКУ")
+        self.win.geometry("900x500")
+        self.win.minsize(500, 300)
+        self.win.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        toolbar = Frame(self.win)
+        toolbar.pack(fill=X, padx=8, pady=(8, 4))
+
+        Label(toolbar, text="Уровень:").pack(side=LEFT)
+        self.tier_var = StringVar(value=self.TIER_OPTIONS[2][0])
+        tier_combo = ttk.Combobox(
+            toolbar,
+            textvariable=self.tier_var,
+            values=[name for name, _ in self.TIER_OPTIONS],
+            width=14,
+            state="readonly",
+        )
+        tier_combo.pack(side=LEFT, padx=(4, 12))
+
+        self.status_var = StringVar(value="")
+        Label(toolbar, textvariable=self.status_var, fg="gray").pack(side=LEFT, fill=X, expand=True)
+
+        Button(toolbar, text="Инфо", command=self._on_info).pack(side=RIGHT, padx=(4, 0))
+        Button(toolbar, text="PING", command=self._on_ping).pack(side=RIGHT, padx=(4, 0))
+        self.stop_btn = Button(toolbar, text="Стоп", command=self._on_stop, state=DISABLED)
+        self.stop_btn.pack(side=RIGHT, padx=(4, 0))
+        self.load_btn = Button(toolbar, text="Загрузить", command=self._on_load)
+        self.load_btn.pack(side=RIGHT, padx=(4, 0))
+        Button(toolbar, text="Очистить", command=self._clear_text).pack(side=RIGHT, padx=(4, 0))
+
+        text_frame = Frame(self.win)
+        text_frame.pack(fill=BOTH, expand=True, padx=8, pady=(0, 8))
+        text_frame.grid_rowconfigure(0, weight=1)
+        text_frame.grid_columnconfigure(0, weight=1)
+        self.log_text = Text(text_frame, wrap="none", font=("Consolas", 9), height=20)
+        yscroll = Scrollbar(text_frame, command=self.log_text.yview)
+        xscroll = Scrollbar(text_frame, orient="horizontal", command=self.log_text.xview)
+        self.log_text.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        xscroll.grid(row=1, column=0, sticky="ew")
+        self.log_text.config(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
+        _bind_readonly_text(self.log_text)
+
+        self._wifi_ok_at_open = True
+        self.status_var.set("Готово")
+
+        self._poll_active = True
+        self.app.root.after(50, self._process_queue)
+
+    def _tier_value(self) -> int:
+        name = self.tier_var.get()
+        for label, value in self.TIER_OPTIONS:
+            if label == name:
+                return value
+        return 2
+
+    def _append_line(self, line: str) -> None:
+        try:
+            self.log_text.insert(END, line + "\n")
+            self.log_text.see(END)
+            self.log_text.update_idletasks()
+        except Exception as exc:
+            messagebox.showerror("Логи ППКУ", f"Ошибка вывода: {exc}", parent=self.win)
+
+    def _clear_text(self) -> None:
+        self.log_text.delete("1.0", END)
+
+    def _set_busy(self, busy: bool) -> None:
+        self.load_btn.config(state=DISABLED if busy else NORMAL)
+        self.stop_btn.config(state=NORMAL if busy else DISABLED)
+        tier_state = DISABLED if busy else "readonly"
+        for child in self.win.winfo_children():
+            if isinstance(child, Frame):
+                for w in child.winfo_children():
+                    if isinstance(w, ttk.Combobox):
+                        w.config(state=tier_state)
+
+    def _require_wifi(self) -> bool:
+        return True
+
+    def _send_log_frame(self, frame: bytes, context: str = "") -> bool:
+        ok = self.app._write_packet(frame, context)
+        if ok:
+            self.text_queue.put({"line": f">> TX {context}: [{frame.hex()}]"})
+        return ok
+
+    def _run_async(self, label: str, worker) -> None:
+        if not self.app.ser or not self.app.ser.is_open:
+            self._append_line("[!] Не подключено")
+            return
+        if not self._require_wifi():
+            return
+        if self.dump_thread and self.dump_thread.is_alive():
+            self._append_line("[!] Операция уже выполняется")
+            return
+
+        self.stop_event.clear()
+        self._set_busy(True)
+        self.status_var.set(label)
+
+        def run():
+            try:
+                worker()
+            finally:
+                self.text_queue.put({"done": True})
+
+        self.dump_thread = threading.Thread(target=run, daemon=True)
+        self.dump_thread.start()
+
+    def _on_ping(self) -> None:
+        self._append_line("[*] Запрос PING…")
+
+        def worker():
+            client = PpkyLogClient(self._send_log_frame, self.app.log_packets)
+            try:
+                result = client.ping()
+            except Exception as exc:
+                result = f"[!] PING: {exc}"
+            result += f"  (всего log-RX: {self.app._log_rx_total})"
+            self.text_queue.put({"line": result})
+
+        self._run_async("PING…", worker)
+
+    def _on_info(self) -> None:
+        self._append_line("[*] Запрос информации о журнале…")
+
+        def worker():
+            client = PpkyLogClient(self._send_log_frame, self.app.log_packets)
+            try:
+                result = client.get_info()
+            except Exception as exc:
+                result = f"[!] GET_INFO: {exc}"
+            result += f"  (всего log-RX: {self.app._log_rx_total})"
+            self.text_queue.put({"line": result})
+
+        self._run_async("Запрос инфо…", worker)
+
+    def _on_load(self) -> None:
+        tier = self._tier_value()
+        tier_name = self.tier_var.get()
+        self._append_line(f"[*] Загрузка лога ({tier_name})…")
+
+        def worker():
+            client = PpkyLogClient(self._send_log_frame, self.app.log_packets)
+            try:
+                for line in client.iter_dump(tier, stop_event=self.stop_event):
+                    self.text_queue.put({"line": line})
+            except Exception as exc:
+                self.text_queue.put({"line": f"[!] Ошибка: {exc}"})
+            self.text_queue.put({"line": f"[*] log-RX кадров за сессию: {self.app._log_rx_total}"})
+
+        self._run_async(f"Загрузка ({tier_name})…", worker)
+
+    def _on_stop(self) -> None:
+        self.stop_event.set()
+        self.status_var.set("Остановка…")
+
+    def _process_queue(self) -> None:
+        if not self._poll_active:
+            return
+        try:
+            while True:
+                item = self.text_queue.get_nowait()
+                if "line" in item:
+                    self._append_line(item["line"])
+                elif "done" in item:
+                    self._set_busy(False)
+                    self.status_var.set("Готово")
+        except queue.Empty:
+            pass
+        except Exception as exc:
+            try:
+                self.status_var.set(f"Ошибка UI: {exc}")
+            except Exception:
+                pass
+        finally:
+            if self._poll_active:
+                try:
+                    if self.win.winfo_exists():
+                        self.app.root.after(50, self._process_queue)
+                except Exception:
+                    pass
+
+    def _on_close(self) -> None:
+        self._poll_active = False
+        self.stop_event.set()
+        if self.dump_thread and self.dump_thread.is_alive():
+            self.dump_thread.join(timeout=2.0)
+        self.app._log_window = None
+        self.win.destroy()
 
 
 def main():

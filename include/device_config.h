@@ -70,6 +70,7 @@ typedef struct PPKYCfg {
 
 	uint8_t beep_block;
 	uint8_t wifi_block;
+	//TODO не забыть выровнять по 4 байта
 
 } PPKYCfg;
 //END PPKY

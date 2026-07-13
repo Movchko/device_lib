@@ -4,6 +4,7 @@
 from hhd_backend import (
     driver_installed,
     fallback_ports_from_pyserial,
+    installed_driver_name,
     is_admin,
     list_serial_devices,
     spmc_available,
@@ -14,7 +15,8 @@ def main() -> int:
     print("=== Проверка COM Port Sniffer ===\n")
 
     print(f"Администратор: {'да' if is_admin() else 'нет'}")
-    print(f"Драйвер hhdserial64.sys: {'установлен' if driver_installed() else 'НЕ найден'}")
+    driver_name = installed_driver_name() or "драйвер мониторинга COM"
+    print(f"Драйвер ({driver_name}): {'установлен' if driver_installed() else 'НЕ найден'}")
 
     ok, msg = spmc_available()
     print(f"SPMC API: {'OK' if ok else 'НЕТ'}")
@@ -44,7 +46,7 @@ def main() -> int:
         print(
             "Драйвер есть, но нет SPMC SDK.\n"
             "Установите Serial Port Monitoring Control от HHD Software —\n"
-            "он использует уже установленный драйвер hhdserial64.sys."
+            "он использует уже установленный драйвер мониторинга COM-порта."
         )
         return 1
 
