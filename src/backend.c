@@ -62,6 +62,7 @@ __attribute__((weak)) void USBSendData(uint8_t *Buf);
 __attribute__((weak)) void UARTSendData(uint8_t *Buf);
 __attribute__((weak)) void ResetConfig();
 __attribute__((weak)) void AplyConfig();
+__attribute__((weak)) void App_OnHostConfigCommand(uint8_t bus, uint8_t command) { (void)bus; (void)command; }
 /* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
 __attribute__((weak)) void CanSendOverError(void) { (void)0; }
 
@@ -467,6 +468,8 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t re
 		case ServiceCmd_SetConfigWord: {
 			uint16_t num_word = 0;
 
+			App_OnHostConfigCommand(reply_bus, Command);
+
 			num_word = MsgData[0];
 			num_word <<= 8;
 			num_word |= MsgData[1];
@@ -487,11 +490,13 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t re
 			SendMessage(Dev, Command, Data, SEND_NOW, reply_bus);
 		}break;
 		case ServiceCmd_SaveConfig: { // save config from local
+			App_OnHostConfigCommand(reply_bus, Command);
 			SaveConfig();
 			SendMessage(Dev, Command, Data, SEND_NOW, reply_bus);
 			AplyConfig();
 		}break;
 		case ServiceCmd_StartSetConfig: { // restore defaults into local config
+			App_OnHostConfigCommand(reply_bus, Command);
 			ResetConfig();
 			SendMessage(Dev, Command, Data, SEND_NOW, reply_bus);
 		}break;

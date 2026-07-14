@@ -197,6 +197,9 @@ void SaveConfig();
 void ResetConfig();
 void AplyConfig();
 
+/* Хост начал/продолжает загрузку конфига на ППКУ (bus: BUS_UART1=WiFi и т.п.). */
+__attribute__((weak)) void App_OnHostConfigCommand(uint8_t bus, uint8_t command);
+
 // работа с удаленным обновлением прошивки
 __attribute__((weak)) uint8_t SetUpdateWord(uint32_t num, uint32_t word);                 // записать 4-байтное слово обновления
 __attribute__((weak)) uint8_t GetUpdateWord(uint32_t num, uint32_t *word);                // прочитать записанное слово (для валидации)

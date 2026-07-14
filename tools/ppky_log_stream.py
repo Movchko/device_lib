@@ -90,6 +90,30 @@ EVENT_LOG_NAMES = {
     12: "EXTINGUISH_COMPLETE",
     13: "EXTINGUISH_INCOMPLETE",
     14: "PANEL_BUTTON",
+    15: "HOST_LINK",
+    16: "CONFIG_APPLY_OK",
+    17: "CONFIG_APPLY_FAIL",
+}
+
+FAULT_CLASS_NAMES = {
+    0: "line_break",
+    1: "line_short",
+    2: "protocol_fault",
+    3: "can_fault",
+    4: "power_fault",
+    5: "other",
+}
+
+HOST_LINK_NAMES = {
+    0: "WiFi",
+    1: "RS485",
+}
+
+CONFIG_APPLY_FAIL_REASONS = {
+    0: "timeout",
+    1: "bad_size",
+    2: "echo_mismatch",
+    3: "crc_mismatch",
 }
 
 
@@ -296,6 +320,21 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
             detail += f" zone={zone}"
         if hold:
             detail += f" hold={hold}s"
+    elif event_code == 8:
+        fc = FAULT_CLASS_NAMES.get(additional[0], f"class_{additional[0]}")
+        ch = additional[1]
+        phase = "CLEARED" if additional[2] else "APPEARED"
+        detail = f"  {phase} {fc}"
+        if ch:
+            detail += f" ch={ch}"
+    elif event_code == 15:
+        media = HOST_LINK_NAMES.get(additional[0], f"media_{additional[0]}")
+        detail = f"  {media}"
+    elif event_code == 16:
+        detail = f"  ok={additional[0]}/{additional[1]}"
+    elif event_code == 17:
+        reason = CONFIG_APPLY_FAIL_REASONS.get(additional[0], f"reason_{additional[0]}")
+        detail = f"  FAIL {reason} h_adr={additional[2]} zone={additional[3]} slot={additional[1]}"
 
     can_part = ""
     if can_header != 0:
