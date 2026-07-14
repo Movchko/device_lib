@@ -89,6 +89,7 @@ EVENT_LOG_NAMES = {
     11: "EXTINGUISH_FORCE_STOP",
     12: "EXTINGUISH_COMPLETE",
     13: "EXTINGUISH_INCOMPLETE",
+    14: "PANEL_BUTTON",
 }
 
 
@@ -262,6 +263,13 @@ def format_bcd_time(time_bcd: bytes) -> str:
     return f"20{yy:02d}-{mo:02d}-{dd:02d} {hh:02d}:{mm:02d}:{ss:02d}"
 
 
+PANEL_BUTTON_NAMES = {
+    0: "ПУСК_ОБЩИЙ",
+    1: "ПУСК_СП",
+    2: "ОСТАНОВ_ПУСКА",
+}
+
+
 def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) -> str:
     if len(rec) < EVENT_LOG_RECORD_SIZE:
         return f"#{logical_idx:05d}  <short record {len(rec)}B>"
@@ -271,12 +279,23 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
     event_code = struct.unpack_from("<H", rec, 8)[0]
     can_header = struct.unpack_from("<I", rec, 10)[0]
     can_data = rec[14:22]
-    _additional = rec[22:30]
+    additional = rec[22:30]
 
     ts = format_bcd_time(time_bcd)
     tier_s = LOG_TIER_NAMES.get(tier, f"T{tier}")
     st_s = REC_STATUS_NAMES.get(status, f"S{status}")
     ev_s = EVENT_LOG_NAMES.get(event_code, f"CODE_{event_code}")
+
+    detail = ""
+    if event_code == 14:
+        btn = PANEL_BUTTON_NAMES.get(additional[0], f"BTN_{additional[0]}")
+        zone = additional[1]
+        hold = additional[3]
+        detail = f"  {btn}"
+        if zone:
+            detail += f" zone={zone}"
+        if hold:
+            detail += f" hold={hold}s"
 
     can_part = ""
     if can_header != 0:
@@ -286,7 +305,7 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
         can_part = f"  {dev} cmd={cmd} data=[{can_data.hex()}]"
 
     wagon_part = f"  вагон={wagon}" if wagon else ""
-    return f"#{logical_idx:05d}  {ts}  {tier_s} {st_s}  {ev_s}{wagon_part}{can_part}"
+    return f"#{logical_idx:05d}  {ts}  {tier_s} {st_s}  {ev_s}{detail}{wagon_part}{can_part}"
 
 
 def parse_data_packet(body: bytes) -> tuple[dict, list[tuple[int, int, int, bytes]]]:
