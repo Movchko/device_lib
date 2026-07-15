@@ -93,6 +93,9 @@ EVENT_LOG_NAMES = {
     15: "HOST_LINK",
     16: "CONFIG_APPLY_OK",
     17: "CONFIG_APPLY_FAIL",
+    18: "SOUND_TOGGLE",
+    19: "FIRE_MODE_CHANGE",
+    20: "TELEMETRY_SAMPLE",
 }
 
 FAULT_CLASS_NAMES = {
@@ -114,6 +117,12 @@ CONFIG_APPLY_FAIL_REASONS = {
     1: "bad_size",
     2: "echo_mismatch",
     3: "crc_mismatch",
+}
+
+FIRE_MODE_NAMES = {
+    0: "auto",
+    1: "autonomous",
+    2: "manual",
 }
 
 
@@ -335,6 +344,14 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
     elif event_code == 17:
         reason = CONFIG_APPLY_FAIL_REASONS.get(additional[0], f"reason_{additional[0]}")
         detail = f"  FAIL {reason} h_adr={additional[2]} zone={additional[3]} slot={additional[1]}"
+    elif event_code == 18:
+        detail = f"  {'ON' if additional[0] else 'OFF'}"
+    elif event_code == 19:
+        mode = FIRE_MODE_NAMES.get(additional[0], f"mode_{additional[0]}")
+        detail = f"  {mode}"
+    elif event_code == 20:
+        kind = "MCU" if additional[0] == 0 else "VDEV"
+        detail = f"  sample {kind}"
 
     can_part = ""
     if can_header != 0:
@@ -385,13 +402,28 @@ def format_get_info_rsp(body: bytes) -> str:
         return f"GET_INFO: {LOG_STATUS_NAMES.get(status, status)}"
     if len(body) < 32:
         return f"GET_INFO: короткий ответ ({len(body)}B)"
+    info = parse_get_info_fields(body)
+    return (
+        f"КРИТ: {info['crit_cnt']}/{info['crit_cap']} (head={info['crit_wh']})  |  "
+        f"ОБЩ: {info['gen_cnt']}/{info['gen_cap']} (head={info['gen_wh']})  |  "
+        f"catalog_crc=0x{info['catalog_crc']:08X}"
+    )
+
+
+def parse_get_info_fields(body: bytes) -> dict:
+    """Разобрать поля GET_INFO (status уже OK, длина ≥32)."""
     crit_cap, crit_cnt, crit_wh = struct.unpack_from("<III", body, 4)
     gen_cap, gen_cnt, gen_wh = struct.unpack_from("<III", body, 16)
     cat_crc = struct.unpack_from("<I", body, 28)[0]
-    return (
-        f"КРИТ: {crit_cnt}/{crit_cap} (head={crit_wh})  |  "
-        f"ОБЩ: {gen_cnt}/{gen_cap} (head={gen_wh})  |  catalog_crc=0x{cat_crc:08X}"
-    )
+    return {
+        "crit_cap": crit_cap,
+        "crit_cnt": crit_cnt,
+        "crit_wh": crit_wh,
+        "gen_cap": gen_cap,
+        "gen_cnt": gen_cnt,
+        "gen_wh": gen_wh,
+        "catalog_crc": cat_crc,
+    }
 
 
 def drain_queue(q: Queue) -> None:
@@ -492,7 +524,7 @@ class PpkyLogClient:
     def _begin_dump(
         self, tier: int, start_logical: int, rsp_timeout: float
     ) -> tuple[int, int, int, int, str] | str:
-        """START_DUMP; вернуть (stream_id, total) или строку ошибки."""
+        """START_DUMP; вернуть (stream_id, total, crit_wh, gen_wh, tier_name) или строку ошибки."""
         extra = struct.pack("<BI", tier, start_logical)
         seq = self.send_request(LOG_OPCODE_START_DUMP, extra, label="LOG START_DUMP")
         try:
@@ -518,14 +550,22 @@ class PpkyLogClient:
 
     def _iter_tier_stream(
         self,
+        tier_id: int,
         stream_id: int,
         tier_name: str,
+        start_logical: int = 0,
         stop_event=None,
-        data_timeout: float = 15.0,
+        rsp_timeout: float = 8.0,
+        data_timeout: float = 30.0,
+        max_resumes: int = 64,
     ) -> Iterator[str]:
-        """Принимать DATA до первой пустой/битой записи или LAST."""
+        """Принимать DATA до LAST; при таймауте — STOP + START_DUMP с last+1."""
         received = 0
         last_pkt_num = -1
+        next_logical = start_logical
+        resumes = 0
+        cur_stream_id = stream_id
+
         while True:
             if stop_event is not None and stop_event.is_set():
                 yield "[*] Остановлено пользователем"
@@ -538,8 +578,39 @@ class PpkyLogClient:
                     lambda p: p["type"] == LOG_PKT_TYPE_DATA,
                 )
             except TimeoutError:
-                yield "[!] Таймаут ожидания DATA"
-                return
+                if stop_event is not None and stop_event.is_set():
+                    yield "[*] Остановлено пользователем"
+                    return
+                if resumes >= max_resumes:
+                    yield (
+                        f"[!] Таймаут DATA — превышен лимит возобновлений "
+                        f"({max_resumes}), logical={next_logical}"
+                    )
+                    return
+                resumes += 1
+                yield (
+                    f"[*] Таймаут DATA — возобновление #{resumes} "
+                    f"с logical={next_logical}…"
+                )
+                self.stop_dump()
+                drain_queue(self._queue)
+                time.sleep(0.05)
+                result = self._begin_dump(tier_id, next_logical, rsp_timeout)
+                if isinstance(result, str):
+                    # BUSY после обрыва — ещё раз STOP и повтор
+                    if "BUSY" in result:
+                        self.stop_dump()
+                        time.sleep(0.1)
+                        result = self._begin_dump(tier_id, next_logical, rsp_timeout)
+                    if isinstance(result, str):
+                        yield result
+                        return
+                cur_stream_id, total, _, _, _ = result
+                last_pkt_num = -1
+                if total == 0:
+                    yield f"[*] Секция {tier_name} завершена: {received} событий"
+                    return
+                continue
 
             body = pkt["body"]
             try:
@@ -548,7 +619,7 @@ class PpkyLogClient:
                 yield f"[!] Ошибка разбора DATA: {exc}"
                 return
 
-            if header["stream_id"] != stream_id:
+            if header["stream_id"] != cur_stream_id:
                 continue
             if header["pkt_num"] <= last_pkt_num and last_pkt_num >= 0:
                 continue
@@ -563,6 +634,7 @@ class PpkyLogClient:
 
             for logical_idx, rec_status, rec_tier, rec_bytes in records:
                 yield format_event_record(logical_idx, rec_status, rec_tier, rec_bytes)
+                next_logical = logical_idx + 1
                 if rec_status == EVENT_LOG_REC_VALID:
                     received += 1
 
@@ -570,13 +642,29 @@ class PpkyLogClient:
                 yield f"[*] Секция {tier_name} завершена: {received} событий"
                 return
 
+    def get_info_fields(self, timeout: float = 8.0) -> dict | str:
+        drain_queue(self._queue)
+        seq = self.send_request(LOG_OPCODE_GET_INFO, label="LOG GET_INFO")
+        try:
+            body = self.wait_rsp(seq, timeout)
+        except TimeoutError:
+            return f"[!] GET_INFO: нет ответа за {timeout:.0f}с"
+        if len(body) < 2:
+            return "[!] GET_INFO: пустой ответ"
+        if body[0] != LOG_STATUS_OK:
+            return f"[!] GET_INFO: {LOG_STATUS_NAMES.get(body[0], body[0])}"
+        if len(body) < 32:
+            return f"[!] GET_INFO: короткий ответ ({len(body)}B)"
+        return parse_get_info_fields(body)
+
     def iter_dump(
         self,
         tier: int,
         start_logical: int = 0,
         stop_event=None,
         rsp_timeout: float = 8.0,
-        data_timeout: float = 15.0,
+        data_timeout: float = 30.0,
+        last_n: int | None = None,
     ) -> Iterator[str]:
         drain_queue(self._queue)
 
@@ -591,20 +679,46 @@ class PpkyLogClient:
             yield f"[!] Неизвестный уровень: {tier}"
             return
 
+        counts: dict[int, int] | None = None
+        if last_n is not None:
+            if last_n <= 0:
+                yield "[!] N должно быть > 0"
+                return
+            info = self.get_info_fields(rsp_timeout)
+            if isinstance(info, str):
+                yield info
+                return
+            counts = {
+                LOG_TIER_CRITICAL: int(info["crit_cnt"]),
+                LOG_TIER_GENERAL: int(info["gen_cnt"]),
+            }
+            yield (
+                f"[*] Последние {last_n} записей "
+                f"(крит={counts[LOG_TIER_CRITICAL]}, общ={counts[LOG_TIER_GENERAL]})"
+            )
+
         total_received = 0
         for tier_id, tier_name in tiers:
             if stop_event is not None and stop_event.is_set():
                 yield "[*] Остановлено пользователем"
                 break
 
-            result = self._begin_dump(tier_id, start_logical, rsp_timeout)
+            tier_start = start_logical
+            if counts is not None:
+                cnt = counts[tier_id]
+                if cnt == 0:
+                    yield f"[*] Журнал ({tier_name}) пуст"
+                    continue
+                tier_start = 0 if cnt <= last_n else (cnt - last_n)
+
+            result = self._begin_dump(tier_id, tier_start, rsp_timeout)
             if isinstance(result, str):
                 yield result
                 break
             stream_id, total, crit_wh, gen_wh, _ = result
             yield (
-                f"[*] Поток #{stream_id} ({tier_name}): ожидается до {total} записей, "
-                f"head_crit={crit_wh}, head_gen={gen_wh}"
+                f"[*] Поток #{stream_id} ({tier_name}): start={tier_start}, "
+                f"ожидается до {total} записей, head_crit={crit_wh}, head_gen={gen_wh}"
             )
             if total == 0:
                 yield f"[*] Журнал ({tier_name}) пуст"
@@ -613,7 +727,13 @@ class PpkyLogClient:
 
             tier_received = 0
             for line in self._iter_tier_stream(
-                stream_id, tier_name, stop_event=stop_event, data_timeout=data_timeout
+                tier_id,
+                stream_id,
+                tier_name,
+                start_logical=tier_start,
+                stop_event=stop_event,
+                rsp_timeout=rsp_timeout,
+                data_timeout=data_timeout,
             ):
                 if line.startswith("#"):
                     tier_received += 1
