@@ -2206,6 +2206,12 @@ class PpkyLogWindow:
         )
         tier_combo.pack(side=LEFT, padx=(4, 12))
 
+        Label(toolbar, text="Последние N:").pack(side=LEFT)
+        self.last_n_var = StringVar(value="100")
+        Entry(toolbar, textvariable=self.last_n_var, width=8).pack(side=LEFT, padx=(4, 4))
+        self.last_n_btn = Button(toolbar, text="Чтение N", command=self._on_load_last_n)
+        self.last_n_btn.pack(side=LEFT, padx=(0, 12))
+
         self.status_var = StringVar(value="")
         Label(toolbar, textvariable=self.status_var, fg="gray").pack(side=LEFT, fill=X, expand=True)
 
@@ -2213,7 +2219,7 @@ class PpkyLogWindow:
         Button(toolbar, text="PING", command=self._on_ping).pack(side=RIGHT, padx=(4, 0))
         self.stop_btn = Button(toolbar, text="Стоп", command=self._on_stop, state=DISABLED)
         self.stop_btn.pack(side=RIGHT, padx=(4, 0))
-        self.load_btn = Button(toolbar, text="Загрузить", command=self._on_load)
+        self.load_btn = Button(toolbar, text="Загрузить всё", command=self._on_load)
         self.load_btn.pack(side=RIGHT, padx=(4, 0))
         Button(toolbar, text="Очистить", command=self._clear_text).pack(side=RIGHT, padx=(4, 0))
 
@@ -2256,6 +2262,7 @@ class PpkyLogWindow:
 
     def _set_busy(self, busy: bool) -> None:
         self.load_btn.config(state=DISABLED if busy else NORMAL)
+        self.last_n_btn.config(state=DISABLED if busy else NORMAL)
         self.stop_btn.config(state=NORMAL if busy else DISABLED)
         tier_state = DISABLED if busy else "readonly"
         for child in self.win.winfo_children():
@@ -2339,6 +2346,34 @@ class PpkyLogWindow:
             self.text_queue.put({"line": f"[*] log-RX кадров за сессию: {self.app._log_rx_total}"})
 
         self._run_async(f"Загрузка ({tier_name})…", worker)
+
+    def _on_load_last_n(self) -> None:
+        tier = self._tier_value()
+        tier_name = self.tier_var.get()
+        raw = self.last_n_var.get().strip()
+        try:
+            n = int(raw)
+        except ValueError:
+            self._append_line("[!] N: введите целое число")
+            return
+        if n <= 0:
+            self._append_line("[!] N должно быть > 0")
+            return
+
+        self._append_line(f"[*] Чтение последних {n} записей ({tier_name})…")
+
+        def worker():
+            client = PpkyLogClient(self._send_log_frame, self.app.log_packets)
+            try:
+                for line in client.iter_dump(
+                    tier, stop_event=self.stop_event, last_n=n
+                ):
+                    self.text_queue.put({"line": line})
+            except Exception as exc:
+                self.text_queue.put({"line": f"[!] Ошибка: {exc}"})
+            self.text_queue.put({"line": f"[*] log-RX кадров за сессию: {self.app._log_rx_total}"})
+
+        self._run_async(f"Последние {n} ({tier_name})…", worker)
 
     def _on_stop(self) -> None:
         self.stop_event.set()
