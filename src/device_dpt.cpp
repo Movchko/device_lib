@@ -15,7 +15,7 @@ VDeviceDPT::VDeviceDPT(uint8_t ChNum) : VDevice(ChNum) {
 	Config = nullptr;
 	Mode = DeviceDPTMode_DPT;
 	max_fire_threshold_c = 60;      /* порог MAX по умолчанию, °C */
-	state_change_delay_ms = 100;    /* фильтр по времени по умолчанию */
+	state_change_delay_ms = 300;    /* фильтр по времени по умолчанию */
 	adc_ch1_value = 0;
 	adc_ch2_value = 0;
 	measured_resistance_ohm = 0;
@@ -63,13 +63,13 @@ void VDeviceDPT::Init() {
 		if (Config->state_change_delay_ms != 0u) {
 			state_change_delay_ms = Config->state_change_delay_ms;
 		} else {
-			state_change_delay_ms = 100u;
+			state_change_delay_ms = 300u;
 		}
 	} else {
 		Mode = DeviceDPTMode_DPT;
 		useMax = 1u;
 		max_fire_threshold_c = 60u;
-		state_change_delay_ms = 100u;
+		state_change_delay_ms = 300u;
 	}
 
 	Status = DeviceDPTStatus_Idle;
