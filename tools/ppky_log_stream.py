@@ -96,6 +96,7 @@ EVENT_LOG_NAMES = {
     18: "SOUND_TOGGLE",
     19: "FIRE_MODE_CHANGE",
     20: "TELEMETRY_SAMPLE",
+    21: "FIRE_RESET",
 }
 
 FAULT_CLASS_NAMES = {
@@ -105,6 +106,7 @@ FAULT_CLASS_NAMES = {
     3: "can_fault",
     4: "power_fault",
     5: "other",
+    6: "position",
 }
 
 HOST_LINK_NAMES = {
@@ -320,6 +322,7 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
     ev_s = EVENT_LOG_NAMES.get(event_code, f"CODE_{event_code}")
 
     detail = ""
+    skip_can_payload = False
     if event_code == 14:
         btn = PANEL_BUTTON_NAMES.get(additional[0], f"BTN_{additional[0]}")
         zone = additional[1]
@@ -330,12 +333,36 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
         if hold:
             detail += f" hold={hold}s"
     elif event_code == 8:
-        fc = FAULT_CLASS_NAMES.get(additional[0], f"class_{additional[0]}")
+        fc_code = additional[0]
+        fc = FAULT_CLASS_NAMES.get(fc_code, f"class_{fc_code}")
         ch = additional[1]
         phase = "CLEARED" if additional[2] else "APPEARED"
-        detail = f"  {phase} {fc}"
-        if ch:
-            detail += f" ch={ch}"
+        parsed_hdr = parse_can_id(can_header) if can_header else None
+        # Новые логи: fault_class=6 (position). Старые: other(5) + h_adr в additional/can_data
+        # и заголовок ППКУ (см. Warning MCU_POSITION_FAULT).
+        is_position = fc_code == 6 or (
+            fc_code == 5
+            and ch != 0
+            and can_data
+            and can_data[0] == ch
+            and parsed_hdr is not None
+            and parsed_hdr.get("d_type") == 10  # DEVICE_PPKY_TYPE
+        )
+        if is_position:
+            hadr = ch or (can_data[0] if can_data else 0)
+            detail = f"  {phase} position h_adr={hadr}"
+            skip_can_payload = True
+        elif fc_code == 3:
+            detail = f"  {phase} {fc} CAN{ch}"
+            skip_can_payload = True
+        elif fc_code == 4:
+            kind = "input" if (can_data and can_data[0]) else "output"
+            detail = f"  {phase} {fc} {kind} ch={ch}"
+            skip_can_payload = True
+        else:
+            detail = f"  {phase} {fc}"
+            if ch:
+                detail += f" ch={ch}"
     elif event_code == 15:
         media = HOST_LINK_NAMES.get(additional[0], f"media_{additional[0]}")
         detail = f"  {media}"
@@ -352,13 +379,19 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
     elif event_code == 20:
         kind = "MCU" if additional[0] == 0 else "VDEV"
         detail = f"  sample {kind}"
+    elif event_code == 21:
+        zone = additional[0]
+        detail = f"  zone={zone}" if zone else "  zone=ALL"
 
     can_part = ""
     if can_header != 0:
         parsed = parse_can_id(can_header)
         dev = format_device(parsed)
-        cmd = can_data[0] if can_data else 0
-        can_part = f"  {dev} cmd={cmd} data=[{can_data.hex()}]"
+        if skip_can_payload:
+            can_part = f"  {dev}"
+        else:
+            cmd = can_data[0] if can_data else 0
+            can_part = f"  {dev} cmd={cmd} data=[{can_data.hex()}]"
 
     wagon_part = f"  вагон={wagon}" if wagon else ""
     return f"#{logical_idx:05d}  {ts}  {tier_s} {st_s}  {ev_s}{detail}{wagon_part}{can_part}"
