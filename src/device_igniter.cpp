@@ -31,6 +31,7 @@ VDeviceIgniter::VDeviceIgniter(uint8_t ChNum) : VDevice(ChNum) {
 	debounce_cnt = 0;
 	pwm_off_cooldown_ms = 0;
 	Counter1s = 0;
+	block = 0;
 }
 
 void VDeviceIgniter::Init() {
@@ -53,6 +54,7 @@ void VDeviceIgniter::Init() {
 		threshold_break_high = Config->threshold_break_high;
 		burn_retry_count     = Config->burn_retry_count;
 		disable_sc_check     = Config->disable_sc_check ? 1 : 0;
+		block 				 = Config->block;
 	} else {
 		threshold_break_low   = 1000;
 		threshold_break_high  = 3000;
@@ -164,6 +166,11 @@ void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 				UpdateStatus(Status);
 				break;
 			}
+
+			/*
+			 * пока на блокировку никак доплнительно не реагируем, просто не запускаем тушение
+			 */
+			if(block) return;
 
 			State = DeviceIgniterState_Run;
 			Status = DeviceIgniterStatus_Run;

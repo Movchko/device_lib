@@ -67,6 +67,9 @@ class VDeviceIgniter: public VDevice {
 	uint8_t start_ack;
 	uint8_t end_ack;
 
+	/* блокировка пуска */
+	uint8_t block;
+
 	void HandleLineState();
 	void UpdatePwm();
 

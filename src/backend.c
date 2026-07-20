@@ -826,6 +826,7 @@ uint8_t BSU_PacketParse(const uint8_t *buf, uint32_t len, uint32_t *out_can_id, 
 	}
 
 	uint16_t pkt_type = (uint16_t)buf[4] | ((uint16_t)buf[5] << 8);
+	//TODO:: разобрать на типы
 	if (pkt_type != BSU_PKT_TYPE_CAN) {
 		return 0;
 	}

@@ -14,6 +14,7 @@ extern "C" {
 
 #define ZONE_NAME_SIZE	64 // 64 символа на имя зоны
 #define ZONE_NUMBER		100 // количество зон
+#define ZONE_BLOCK_BYTES ((ZONE_NUMBER + 7u) / 8u)
 
 #define MAX_MCU_IN_BUS 32
 
@@ -70,7 +71,8 @@ typedef struct PPKYCfg {
 
 	uint8_t beep_block;
 	uint8_t wifi_block;
-	//TODO не забыть выровнять по 4 байта
+	/* Блокировка пуска по зонам: 1 бит на зону */
+	uint8_t zone_block[ZONE_BLOCK_BYTES];
 
 } PPKYCfg;
 //END PPKY
@@ -149,10 +151,13 @@ typedef struct DeviceIgniterConfig {
 	/* Количество повторных циклов прожига при отсутствии обрыва По умолчанию 0 */
 	uint8_t burn_retry_count;
 
+	/*Блокировка пуска */
+	uint8_t block;
+
 	/* резерв до полного размера VDeviceCfg::reserv (64 байта).
 	 * Для текущего порядка полей есть 1 байт выравнивания перед threshold_break_low,
 	 * поэтому используем 7 байт служебной части. */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 7];
+	uint8_t reserved[VDEVICE_CFG_SIZE - 8];
 } DeviceIgniterConfig;
 
 typedef struct DeviceRelayConfig {
