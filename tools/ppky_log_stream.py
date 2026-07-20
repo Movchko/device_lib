@@ -382,12 +382,20 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
     elif event_code == 21:
         zone = additional[0]
         detail = f"  zone={zone}" if zone else "  zone=ALL"
+    elif event_code in (4, 5, 6):
+        phase = "CLEARED" if additional[0] else "APPEARED"
+        detail = f"  {phase}"
+        if event_code == 6:
+            detail += f" slot={additional[1]}"
+        elif additional[2]:
+            detail += f" ch={additional[2]}"
+        skip_can_payload = True
 
     can_part = ""
     if can_header != 0:
         parsed = parse_can_id(can_header)
         dev = format_device(parsed)
-        if skip_can_payload:
+        if skip_can_payload or event_code in (4, 5, 6):
             can_part = f"  {dev}"
         else:
             cmd = can_data[0] if can_data else 0
