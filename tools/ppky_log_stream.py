@@ -97,6 +97,7 @@ EVENT_LOG_NAMES = {
     19: "FIRE_MODE_CHANGE",
     20: "TELEMETRY_SAMPLE",
     21: "FIRE_RESET",
+    22: "MCU_SAVED",
 }
 
 FAULT_CLASS_NAMES = {
@@ -382,6 +383,12 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
     elif event_code == 21:
         zone = additional[0]
         detail = f"  zone={zone}" if zone else "  zone=ALL"
+    elif event_code == 22:
+        uid0 = struct.unpack_from("<I", can_data, 0)[0]
+        uid1 = struct.unpack_from("<I", can_data, 4)[0]
+        uid2 = struct.unpack_from("<I", additional, 0)[0]
+        detail = f"  S/N:{uid0:08X}:{uid1:08X}:{uid2:08X}"
+        skip_can_payload = True
     elif event_code in (4, 5, 6):
         phase = "CLEARED" if additional[0] else "APPEARED"
         detail = f"  {phase}"
@@ -401,8 +408,8 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
             cmd = can_data[0] if can_data else 0
             can_part = f"  {dev} cmd={cmd} data=[{can_data.hex()}]"
 
-    wagon_part = f"  вагон={wagon}" if wagon else ""
-    return f"#{logical_idx:05d}  {ts}  {tier_s} {st_s}  {ev_s}{detail}{wagon_part}{can_part}"
+    master_part = f"  мастер={wagon}" if wagon else ""
+    return f"#{logical_idx:05d}  {ts}  {tier_s} {st_s}  {ev_s}{detail}{master_part}{can_part}"
 
 
 def parse_data_packet(body: bytes) -> tuple[dict, list[tuple[int, int, int, bytes]]]:
