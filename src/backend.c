@@ -689,8 +689,23 @@ void BroadcastSetStatusFire(uint8_t zone_can, uint8_t source, uint8_t origin_d_t
 }
 
 void SetReplyStatusFire(uint8_t zone) {
-	uint8_t Data[7] = {zone, 0, 0, 0, 0, 0, 0};
-	SendMessage(0, ServiceCmd_Fire_ReplyStatusFire, Data, 1, BUS_CAN12);
+	/* zone в CAN ID должен совпадать с зоной пожара (МКУ), а не с зоной ППКУ (=0).
+	 * Иначе МКУ не снимает g_fire_retry_active и раз в ~1 с шлёт SetStatusFire снова. */
+	can_ext_id_t can_id;
+	uint8_t data[8] = {
+		ServiceCmd_Fire_ReplyStatusFire,
+		zone,
+		0u, 0u, 0u, 0u, 0u, 0u
+	};
+
+	can_id.ID = 0u;
+	can_id.field.dir = 1u;
+	can_id.field.d_type = BoardDevicesList[0].d_type & 0x7Fu;
+	can_id.field.h_adr = BoardDevicesList[0].h_adr;
+	can_id.field.l_adr = BoardDevicesList[0].l_adr & 0x3Fu;
+	can_id.field.zone = zone & 0x7Fu;
+
+	SendMessageFull(can_id, data, SEND_NOW, BUS_CAN12);
 }
 
 void SetReplyStartExtinguishment(uint8_t dev) {
@@ -774,40 +789,63 @@ uint16_t BSU_Checksum(const uint8_t *data, uint32_t len)
 	return (uint16_t)(sum & 0xFFFFu);
 }
 
+uint16_t BSU_PacketBuild(uint8_t *out_buf, uint32_t buf_size, uint16_t pkt_type, uint16_t seq,
+                         const uint8_t *payload, uint16_t payload_len)
+{
+	uint16_t pkt_size;
+	uint16_t pos;
+
+	if (out_buf == NULL || buf_size < BSU_PKT_HEADER_SIZE + BSU_PKT_CHECKSUM_SIZE) {
+		return 0;
+	}
+	if (payload_len > 0u && payload == NULL) {
+		return 0;
+	}
+
+	pkt_size = (uint16_t)(BSU_PKT_HEADER_SIZE + payload_len + BSU_PKT_CHECKSUM_SIZE);
+	if (buf_size < pkt_size || pkt_size > BSU_PKT_MAX_SIZE) {
+		return 0;
+	}
+
+	pos = 0;
+	out_buf[pos++] = BSU_PKT_PREAMBLE_LO;
+	out_buf[pos++] = BSU_PKT_PREAMBLE_HI;
+	out_buf[pos++] = (uint8_t)(pkt_size & 0xFFu);
+	out_buf[pos++] = (uint8_t)(pkt_size >> 8);
+	out_buf[pos++] = (uint8_t)(pkt_type & 0xFFu);
+	out_buf[pos++] = (uint8_t)(pkt_type >> 8);
+	out_buf[pos++] = (uint8_t)(seq & 0xFFu);
+	out_buf[pos++] = (uint8_t)(seq >> 8);
+
+	if (payload_len > 0u) {
+		memcpy(&out_buf[pos], payload, payload_len);
+		pos = (uint16_t)(pos + payload_len);
+	}
+
+	{
+		uint16_t crc = BSU_Checksum(out_buf, pos);
+		out_buf[pos++] = (uint8_t)(crc & 0xFFu);
+		out_buf[pos++] = (uint8_t)(crc >> 8);
+	}
+
+	return pos;
+}
+
 uint16_t BSU_PacketBuildCan(uint8_t *out_buf, uint32_t buf_size, uint32_t can_id, const uint8_t *data)
 {
+	uint8_t payload[BSU_PKT_CAN_PAYLOAD];
+
 	if (out_buf == NULL || data == NULL || buf_size < BSU_PKT_CAN_SIZE) {
 		return 0;
 	}
 
-	uint16_t pos = 0;
+	payload[0] = (uint8_t)(can_id & 0xFFu);
+	payload[1] = (uint8_t)((can_id >> 8) & 0xFFu);
+	payload[2] = (uint8_t)((can_id >> 16) & 0xFFu);
+	payload[3] = (uint8_t)((can_id >> 24) & 0xFFu);
+	memcpy(&payload[4], data, 8);
 
-	out_buf[pos++] = BSU_PKT_PREAMBLE_LO;
-	out_buf[pos++] = BSU_PKT_PREAMBLE_HI;
-
-	uint16_t pkt_size = BSU_PKT_CAN_SIZE;
-	out_buf[pos++] = (uint8_t)(pkt_size & 0xFFu);
-	out_buf[pos++] = (uint8_t)(pkt_size >> 8);
-
-	out_buf[pos++] = (uint8_t)(BSU_PKT_TYPE_CAN & 0xFFu);
-	out_buf[pos++] = (uint8_t)(BSU_PKT_TYPE_CAN >> 8);
-
-	out_buf[pos++] = 0;  /* seq lo - для CAN всегда 0 */
-	out_buf[pos++] = 0;  /* seq hi */
-
-	out_buf[pos++] = (uint8_t)(can_id & 0xFFu);
-	out_buf[pos++] = (uint8_t)((can_id >> 8) & 0xFFu);
-	out_buf[pos++] = (uint8_t)((can_id >> 16) & 0xFFu);
-	out_buf[pos++] = (uint8_t)((can_id >> 24) & 0xFFu);
-
-	memcpy(&out_buf[pos], data, 8);
-	pos += 8;
-
-	uint16_t crc = BSU_Checksum(out_buf, pos);
-	out_buf[pos++] = (uint8_t)(crc & 0xFFu);
-	out_buf[pos++] = (uint8_t)(crc >> 8);
-
-	return (uint16_t)pos;
+	return BSU_PacketBuild(out_buf, buf_size, BSU_PKT_TYPE_CAN, 0u, payload, BSU_PKT_CAN_PAYLOAD);
 }
 
 uint8_t BSU_PacketParse(const uint8_t *buf, uint32_t len, uint32_t *out_can_id, uint8_t *out_data)

@@ -228,14 +228,23 @@ const char *GetAppVersion(void);                                     // верс
 
 #define BSU_PKT_TYPE_CAN     0u
 #define BSU_PKT_TYPE_CAN2    1u
+/* Типы 2..5 — ESP32 (см. esp_protocol.h) */
 
 #define BSU_PKT_HEADER_SIZE  (2u + 2u + 2u + 2u)  /* preamble + size + type + seq */
 #define BSU_PKT_CAN_PAYLOAD  (4u + 8u)           /* id + data */
 #define BSU_PKT_CHECKSUM_SIZE 2u
 #define BSU_PKT_CAN_SIZE     (BSU_PKT_HEADER_SIZE + BSU_PKT_CAN_PAYLOAD + BSU_PKT_CHECKSUM_SIZE)
+#define BSU_PKT_MAX_SIZE     256u
 
 /** Контрольная сумма: 16-bit sum по data[0..len-1] */
 uint16_t BSU_Checksum(const uint8_t *data, uint32_t len);
+
+/**
+ * Универсальная сборка BSU-кадра.
+ * @return длина кадра или 0 при ошибке
+ */
+uint16_t BSU_PacketBuild(uint8_t *out_buf, uint32_t buf_size, uint16_t pkt_type, uint16_t seq,
+                         const uint8_t *payload, uint16_t payload_len);
 
 /**
  * Формирование CAN-пакета для отправки.

@@ -147,12 +147,10 @@ void VDeviceRelay::CommandCB(uint8_t Command, uint8_t *Parameters)
 			SavePersistentStateIfNeeded();
 		}
 	} else if (Command == 11u) {
-		/* cmd=11: установить режим реле (0..3). */
+		/* cmd=11: установить режим реле . */
 		if (Config != nullptr && Parameters != nullptr) {
 			uint8_t mode = Parameters[0];
-			if (mode > 3u) {
-				mode = 3u;
-			}
+
 			Config->mode = mode;
 			if (VDeviceSaveCfg != nullptr) {
 				VDeviceSaveCfg();
