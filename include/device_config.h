@@ -72,7 +72,15 @@ typedef struct PPKYCfg {
 	uint8_t beep_block;
 	uint8_t wifi_block;
 	/* Блокировка пуска по зонам: 1 бит на зону */
-	uint8_t zone_block[ZONE_BLOCK_BYTES];
+	//uint8_t zone_block[ZONE_BLOCK_BYTES];
+
+	/* для госта важно разделять режима запуска по каждой зоне
+	 * 0 - автоматический,
+	 * 1 - автономный, (для совместимости. по факту не используется в госте)
+	 * 2 - ручной
+	 * 3 - заблокировано
+	 */
+	uint8_t zone_fire_mode[ZONE_NUMBER];
 
 } PPKYCfg;
 //END PPKY
@@ -192,6 +200,7 @@ typedef struct DeviceRelayConfig {
 	 * 4 - переключение по пожару в любой зоне
 	 * 5 - переключение по пуск СП по своей зоне
 	 * 6 - переключение по пуск в любой зоне
+	 * 7 - переключение по неисправности в любой зоне
 	 * */
 	uint8_t mode;
 
