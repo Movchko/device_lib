@@ -600,7 +600,10 @@ ZONE_NUMBER_CFG = 100
 ZONE_NAME_SIZE_CFG = 64
 ZONE_NAME_AREA_CFG = ZONE_NUMBER_CFG * ZONE_NAME_SIZE_CFG  # 6400
 FIRE_AND_BYTES_CFG = ZONE_NUMBER_CFG  # uint8_t fire_and[ZONE_NUMBER]
-PPKY_TAIL_BYTES_CFG = 2  # beep_block + wifi_block после fire_and[]
+# После fire_and[]: beep_block + wifi_block + zone_fire_mode[ZONE_NUMBER]
+PPKY_BEEP_WIFI_BYTES_CFG = 2
+ZONE_FIRE_MODE_BYTES_CFG = ZONE_NUMBER_CFG  # uint8_t zone_fire_mode[ZONE_NUMBER]
+PPKY_TAIL_BYTES_CFG = PPKY_BEEP_WIFI_BYTES_CFG + ZONE_FIRE_MODE_BYTES_CFG
 NUM_DEV_IN_MCU_CFG = 32
 MKU_UID_BYTES = 32
 MKU_VDTYPE_BYTES = NUM_DEV_IN_MCU_CFG * 4  # 128
@@ -931,44 +934,65 @@ def _wait_device_config_response(
     expected_cmd: int,
     expected_word_idx: int | None = None,
     transport_hint: str = "auto",
+    total_timeout: float | None = None,
+    resend_interval: float | None = None,
+    max_sends: int | None = None,
 ) -> bytes | None:
-    """Ожидание сервисного ответа Get/SetConfigWord от конкретного устройства."""
-    total_timeout, retry_ms = _config_io_timeouts(transport_hint)
+    """Ожидание сервисного ответа Get/SetConfigWord / SaveConfig от конкретного устройства.
+
+    По умолчанию — частые повторы (удобно для Get/SetConfigWord).
+    Для SaveConfig передавайте max_sends=1: повторная SaveConfig во время
+    долгой записи Flash зависает ППКУ.
+    """
+    default_total, default_interval = _config_io_timeouts(transport_hint)
+    if total_timeout is None:
+        total_timeout = default_total
+    if resend_interval is None:
+        resend_interval = default_interval
+    if max_sends is None:
+        # Сколько раз успеем переотправить за окно ожидания (старое поведение).
+        max_sends = max(1, int(total_timeout / max(resend_interval, 0.001)) + 1)
+
     target = parse_can_id(can_id_req)
     old_timeout = ser.timeout
     ser.timeout = 0
     deadline = time.time() + total_timeout
+    sends = 0
+    next_send_at = 0.0
     try:
         while time.time() < deadline:
-            pkt = build_bsu_can_packet(can_id_req, req_data)
-            ser.write(pkt)
-            retry_deadline = time.time() + retry_ms
-            while time.time() < retry_deadline:
-                chunk = ser.read(512)
-                for b in chunk:
-                    result = bsu.feed(b)
-                    if not result:
+            now = time.time()
+            if sends < max_sends and now >= next_send_at:
+                pkt = build_bsu_can_packet(can_id_req, req_data)
+                ser.write(pkt)
+                sends += 1
+                next_send_at = now + resend_interval
+
+            chunk = ser.read(512)
+            for b in chunk:
+                result = bsu.feed(b)
+                if not result:
+                    continue
+                rid, rdata = result[0], result[1]
+                if len(rdata) == 0 or rdata[0] != expected_cmd:
+                    continue
+                p = parse_can_id(rid)
+                if p["dir"] != 1:
+                    continue
+                if (
+                    p["d_type"] != target["d_type"]
+                    or p["h_adr"] != target["h_adr"]
+                    or p["l_adr"] != target["l_adr"]
+                    or p["zone"] != target["zone"]
+                ):
+                    continue
+                if expected_word_idx is not None and len(rdata) >= 3:
+                    got_idx = (rdata[1] << 8) | rdata[2]
+                    if got_idx != expected_word_idx:
                         continue
-                    rid, rdata = result[0], result[1]
-                    if len(rdata) == 0 or rdata[0] != expected_cmd:
-                        continue
-                    p = parse_can_id(rid)
-                    if p["dir"] != 1:
-                        continue
-                    if (
-                        p["d_type"] != target["d_type"]
-                        or p["h_adr"] != target["h_adr"]
-                        or p["l_adr"] != target["l_adr"]
-                        or p["zone"] != target["zone"]
-                    ):
-                        continue
-                    if expected_word_idx is not None and len(rdata) >= 3:
-                        got_idx = (rdata[1] << 8) | rdata[2]
-                        if got_idx != expected_word_idx:
-                            continue
-                    return rdata
-                if not chunk:
-                    time.sleep(0.001)
+                return rdata
+            if not chunk:
+                time.sleep(0.001)
     finally:
         ser.timeout = old_timeout
     return None
@@ -1030,12 +1054,74 @@ def save_mku_config(
     zone: int,
     transport_hint: str = "auto",
 ) -> bool:
+    """SaveConfig: одна отправка, долгое ожидание ACK.
+
+    Повторные SaveConfig во время записи SPI Flash (весь PPKYCfg) вешают ППКУ.
+    """
     can_id = build_can_id(d_type, h_adr, l_adr, zone, 0)
     req = bytes([SVC_SAVE_CONFIG]) + b"\x00" * 7
+    th = (transport_hint or "auto").strip().lower()
+    # Полная запись конфига во Flash — секунды; WiFi ещё медленнее.
+    total_timeout = 60.0 if th == "wifi" else 30.0
     rsp = _wait_device_config_response(
-        ser, bsu, can_id, req, SVC_SAVE_CONFIG, transport_hint=transport_hint
+        ser,
+        bsu,
+        can_id,
+        req,
+        SVC_SAVE_CONFIG,
+        transport_hint=transport_hint,
+        total_timeout=total_timeout,
+        resend_interval=total_timeout,  # не переотправлять в окне ожидания
+        max_sends=1,
     )
     return rsp is not None
+
+
+def ppky_zone_name_word_base(zone_num_1based: int, mku_stride: int = MKU_STRIDE_BYTES) -> int:
+    """Индекс первого слова Get/SetConfigWord для имени зоны (зона 1 → zone_name[0])."""
+    if zone_num_1based < 1 or zone_num_1based > ZONE_NUMBER_CFG:
+        raise ValueError(f"zone_num out of range: {zone_num_1based}")
+    zone_idx = zone_num_1based - 1
+    byte_off = CFG_BASE + NUM_DEV_IN_MCU_CFG * mku_stride + zone_idx * ZONE_NAME_SIZE_CFG
+    return byte_off // 4
+
+
+def write_ppky_zone_name(
+    ser,
+    bsu: BSUParser,
+    h_adr: int,
+    zone_num_1based: int,
+    name: str,
+    transport_hint: str = "auto",
+    mku_stride: int = MKU_STRIDE_BYTES,
+    save: bool = True,
+) -> bool:
+    """Записать имя зоны в PPKYCfg.zone_name[] и опционально SaveConfig."""
+    raw = (name or "").encode("utf-8", errors="replace")[: ZONE_NAME_SIZE_CFG - 1]
+    buf = bytearray(ZONE_NAME_SIZE_CFG)
+    buf[: len(raw)] = raw
+    word0 = ppky_zone_name_word_base(zone_num_1based, mku_stride=mku_stride)
+    words = ZONE_NAME_SIZE_CFG // 4  # 16
+    for i in range(words):
+        pos = i * 4
+        word_be = struct.unpack(">I", bytes(buf[pos : pos + 4]))[0]
+        if not write_mku_config_word(
+            ser,
+            bsu,
+            DEVICE_PPKY_TYPE,
+            h_adr,
+            0,
+            0,
+            word0 + i,
+            word_be,
+            transport_hint=transport_hint,
+        ):
+            return False
+    if not save:
+        return True
+    return save_mku_config(
+        ser, bsu, DEVICE_PPKY_TYPE, h_adr, 0, 0, transport_hint=transport_hint
+    )
 
 
 def apply_mku_factory_defaults(
@@ -1481,12 +1567,16 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
     if len(reserv) < 8:
         return ""
     parts: list[str] = []
-    if vd_type == 11:  # DeviceIgniterConfig: uint8 + pad + 2×uint16 + uint8 + …
+    if vd_type == 11:  # DeviceIgniterConfig: uint8 + pad + 2×uint16 + uint8 + uint8 block
         disable = reserv[0]
         th_lo = _u16_le_buf(reserv, 2)
         th_hi = _u16_le_buf(reserv, 4)
         retry = reserv[6]
-        parts.append(f"пороги={th_lo}-{th_hi}мВ retry={retry} КЗ_чек={'выкл' if disable else 'вкл'}")
+        block = reserv[7] if len(reserv) > 7 else 0
+        parts.append(
+            f"пороги={th_lo}-{th_hi}мВ retry={retry} "
+            f"КЗ_чек={'выкл' if disable else 'вкл'} блок_пуска={'да' if block else 'нет'}"
+        )
     elif vd_type == 12:  # DeviceDPTConfig
         mode = reserv[0]
         use_max = reserv[1]
@@ -1496,7 +1586,15 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
     elif vd_type == 17:  # DeviceRelayConfig
         settle = _u16_le_buf(reserv, 4)
         mode = reserv[6] if len(reserv) > 6 else 0
-        mode_names = ("нет авто", "по пожару", "по неисправности", "по концевику")
+        mode_names = (
+            "нет авто",
+            "пожар своей зоны",
+            "неисправность своей зоны",
+            "концевик своей зоны",
+            "пожар любой зоны",
+            "пуск СП своей зоны",
+            "пуск любой зоны",
+        )
         mode_s = mode_names[mode] if mode < len(mode_names) else str(mode)
         saved = reserv[7] if len(reserv) > 7 else 0
         parts.append(
@@ -1538,7 +1636,7 @@ def parse_config_display(
     """
     Парсит PPKYCfg (device_config.h) и возвращает список строк с полями.
     PPKYCfg: UniqId(32), beep..isBRP, was_fire(u32), baudrates, reserv[20], CfgDevices[32]×MKUCfg,
-    zone_name[100][64], fire_and[100], beep_block, wifi_block.
+    zone_name[100][64], fire_and[100], beep_block, wifi_block, zone_fire_mode[100].
     MKUCfg: UId, VDtype[32], zone_delay, module_delay[32], Devices[32]×64, reserv[64].
     """
     lines: list[str] = []
@@ -1648,7 +1746,7 @@ def parse_config_display(
         name = name_bytes.split(b"\x00")[0].decode("utf-8", errors="replace").strip()
         if not name:
             break
-        lines.append(f"zone_name[{z}]: {name!r}")
+        lines.append(f"зона {z + 1}: {name!r}")
 
     # fire_and[ZONE_NUMBER] + beep_block + wifi_block
     fire_off = fire_and_offset
@@ -1671,10 +1769,28 @@ def parse_config_display(
                 )
 
     tail_off = fire_off + FIRE_AND_BYTES_CFG
-    if tail_off + PPKY_TAIL_BYTES_CFG <= len(cfg):
+    if tail_off + PPKY_BEEP_WIFI_BYTES_CFG <= len(cfg):
         beep_block = cfg[tail_off]
         wifi_block = cfg[tail_off + 1]
         lines.append(f"beep_block={beep_block} wifi_block={wifi_block}")
+
+    zfm_off = tail_off + PPKY_BEEP_WIFI_BYTES_CFG
+    if zfm_off + ZONE_FIRE_MODE_BYTES_CFG <= len(cfg):
+        zfm = cfg[zfm_off : zfm_off + ZONE_FIRE_MODE_BYTES_CFG]
+        mode_names = ("авто", "автоном", "ручной", "блок")
+        parts_zfm: list[str] = []
+        for zi, mode in enumerate(zfm):
+            if mode == 0:
+                continue
+            # В UI зона = индекс+1 (zone_name[0] ↔ зона 1)
+            mn = mode_names[mode] if mode < len(mode_names) else str(mode)
+            parts_zfm.append(f"{zi + 1}:{mn}")
+        if parts_zfm:
+            preview = ", ".join(parts_zfm[:40])
+            more = f" …(+{len(parts_zfm) - 40})" if len(parts_zfm) > 40 else ""
+            lines.append(f"zone_fire_mode (не авто): {preview}{more}")
+        else:
+            lines.append("zone_fire_mode: все зоны в режиме «авто»")
 
     return lines
 

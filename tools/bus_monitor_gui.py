@@ -98,6 +98,7 @@ from bus_monitor import (
     BSUParser,
     read_config_bytes,
     parse_config_display,
+    write_ppky_zone_name,
     DEVICE_PPKY_TYPE,
     DEVICE_NAMES,
     SVC_GET_CONFIG_SIZE,
@@ -229,11 +230,16 @@ class BusMonitorGUI:
         self.relay_l_var = StringVar(value="1")
         self.relay_mode_options = (
             "0 - нет авто",
-            "1 - по пожару",
-            "2 - по неисправности",
-            "3 - по концевику",
+            "1 - пожар своей зоны",
+            "2 - неисправность своей зоны",
+            "3 - концевик своей зоны",
+            "4 - пожар любой зоны",
+            "5 - пуск СП своей зоны",
+            "6 - пуск любой зоны",
         )
         self.relay_mode_var = StringVar(value=self.relay_mode_options[0])
+        self.zone_name_num_var = StringVar(value="1")
+        self.zone_name_text_var = StringVar(value="")
         self.relay_initial_state_var = StringVar(value="0")
         self.relay_persist_state_var = StringVar(value="0")
         self.relay_feedback_inverted_var = StringVar(value="0")
@@ -443,7 +449,7 @@ class BusMonitorGUI:
             textvariable=self.relay_mode_var,
             values=self.relay_mode_options,
             state="readonly",
-            width=18,
+            width=24,
         )
         self.relay_mode_combo.pack(side=LEFT, padx=(0, 4))
         Button(relay_frame, text="Set mode", command=self._send_relay_mode).pack(side=LEFT, padx=(2, 6))
@@ -575,6 +581,26 @@ class BusMonitorGUI:
         Entry(dpt_frame, textvariable=self.dpt_l_var, width=3).pack(side=LEFT, padx=(0, 8))
         Button(dpt_frame, text="КЗ", command=self._send_dpt_short_once).pack(side=LEFT, padx=(8, 0))
         Button(dpt_frame, text="ОБРЫВ", command=self._send_dpt_break_once).pack(side=LEFT, padx=(4, 0))
+
+        # --- Имя зоны ППКУ ---
+        zone_name_frame = Frame(main)
+        zone_name_frame.pack(fill=X, pady=(0, 8))
+        Label(zone_name_frame, text="Имя зоны:").pack(side=LEFT, padx=(0, 4))
+        Label(zone_name_frame, text="№").pack(side=LEFT, padx=(8, 2))
+        self.zone_name_combo = ttk.Combobox(
+            zone_name_frame,
+            textvariable=self.zone_name_num_var,
+            values=[str(i) for i in range(1, 33)],
+            state="readonly",
+            width=4,
+        )
+        self.zone_name_combo.pack(side=LEFT, padx=(0, 8))
+        Label(zone_name_frame, text="имя").pack(side=LEFT, padx=(0, 2))
+        Entry(zone_name_frame, textvariable=self.zone_name_text_var, width=40).pack(side=LEFT, padx=(0, 8))
+        self.zone_name_save_btn = Button(
+            zone_name_frame, text="Сохранить имя зоны", command=self._save_zone_name
+        )
+        self.zone_name_save_btn.pack(side=LEFT)
 
         # --- Панель конфига ---
         config_frame = Frame(main)
@@ -793,6 +819,10 @@ class BusMonitorGUI:
                     elif "config_result" in item:
                         cfg_bytes, size = item["config_result"]
                         self._apply_config_result(cfg_bytes, size)
+                    elif "zone_name_done" in item:
+                        self.connect_btn.config(state=NORMAL)
+                        if hasattr(self, "zone_name_save_btn"):
+                            self.zone_name_save_btn.config(state=NORMAL)
                     elif "refresh_status" in item:
                         refresh = True
                     elif "log" in item:
@@ -1428,7 +1458,7 @@ class BusMonitorGUI:
         return h, l, zone, used_fallback
 
     def _send_relay_mode(self):
-        """Установить режим реле (cmd=11, val=0..3)."""
+        """Установить режим реле (cmd=11, val=0..6)."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
@@ -1443,8 +1473,8 @@ class BusMonitorGUI:
             mode = 0
         if mode < 0:
             mode = 0
-        if mode > 3:
-            mode = 3
+        if mode > 6:
+            mode = 6
         can_id = build_can_id(17, h, l, zone, 0)
         data = bytes([11, mode]) + b"\x00" * 6
         pkt = build_bsu_can_packet(can_id, data)
@@ -2041,6 +2071,71 @@ class BusMonitorGUI:
         can_id = build_can_id(DEVICE_PPKY_TYPE, h, 0, 0, 0)  # dir=0 запрос
         data = bytes([157, bcd_h, bcd_m, bcd_s, bcd_y, bcd_mon, bcd_day])
         self._send_ppky_cmd_broadcast(data, f"SetSystemTime {hh:02d}:{mm:02d}:{ss:02d} {day:02d}.{mon:02d}.{now.year:04d}")
+
+    def _save_zone_name(self):
+        """Записать имя зоны в PPKYCfg.zone_name[zone-1] через SetConfigWord + SaveConfig."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        try:
+            zone_num = int(self.zone_name_num_var.get() or "0")
+        except ValueError:
+            self.msg_queue.put({"log": "[!] Номер зоны: 1..32"})
+            return
+        if zone_num < 1 or zone_num > 32:
+            self.msg_queue.put({"log": "[!] Номер зоны: 1..32"})
+            return
+        try:
+            h = int(self.h_adr_var.get() or "0")
+        except ValueError:
+            h = 0
+        name = self.zone_name_text_var.get() or ""
+        if len(name.encode("utf-8", errors="replace")) > 63:
+            self.msg_queue.put({"log": "[!] Имя зоны обрежется до 63 байт UTF-8"})
+
+        self.connect_btn.config(state=DISABLED)
+        self.zone_name_save_btn.config(state=DISABLED)
+        self.msg_queue.put({
+            "log": (
+                f"[*] Сохранение имени зоны {zone_num}: {name!r}… "
+                "(SetConfigWord×16, затем один SaveConfig — может занять до минуты)"
+            )
+        })
+
+        def do_save():
+            ok = False
+            try:
+                self.reader_stop.set()
+                if self.reader_thread:
+                    self.reader_thread.join(timeout=1.0)
+                cfg_parser = BSUParser(be_id=False)
+                ok = write_ppky_zone_name(
+                    self.ser,
+                    cfg_parser,
+                    h,
+                    zone_num,
+                    name,
+                    transport_hint=("wifi" if self._is_wifi_transport() else "usb"),
+                    save=True,
+                )
+            except Exception as e:
+                self.msg_queue.put({"log": f"[!] SaveZoneName failed: {e}"})
+            finally:
+                self.reader_stop.clear()
+                if self.ser and self.ser.is_open:
+                    self.reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
+                    self.reader_thread.start()
+                self.msg_queue.put({
+                    "log": (
+                        f"[*] Имя зоны {zone_num} сохранено: {name!r}"
+                        if ok else
+                        f"[!] Не удалось сохранить имя зоны {zone_num} "
+                        "(проверьте h_adr ППКУ; SaveConfig шлётся один раз)"
+                    )
+                })
+                self.msg_queue.put({"zone_name_done": True})
+
+        threading.Thread(target=do_save, daemon=True).start()
 
     def _read_full_config(self):
         if not self.ser or not self.ser.is_open:
