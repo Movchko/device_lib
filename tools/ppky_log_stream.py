@@ -98,6 +98,9 @@ EVENT_LOG_NAMES = {
     20: "TELEMETRY_SAMPLE",
     21: "FIRE_RESET",
     22: "MCU_SAVED",
+    23: "PANEL_BTN_PRESS",
+    24: "COUNTDOWN_PAUSE",
+    25: "COUNTDOWN_RESUME",
 }
 
 FAULT_CLASS_NAMES = {
@@ -389,6 +392,22 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
         uid2 = struct.unpack_from("<I", additional, 0)[0]
         detail = f"  S/N:{uid0:08X}:{uid1:08X}:{uid2:08X}"
         skip_can_payload = True
+    elif event_code == 23:
+        btn = PANEL_BUTTON_NAMES.get(additional[0], f"BTN_{additional[0]}")
+        zone = additional[1]
+        detail = f"  press {btn}"
+        if zone:
+            detail += f" zone={zone}"
+    elif event_code == 24:
+        zone = additional[0]
+        src = "panel" if additional[1] == 0 else ("can" if additional[1] == 1 else f"src={additional[1]}")
+        detail = f"  pause {src}"
+        detail += f" zone={zone}" if zone else " zone=ALL"
+    elif event_code == 25:
+        zone = additional[0]
+        src = "panel" if additional[1] == 0 else ("can" if additional[1] == 1 else f"src={additional[1]}")
+        detail = f"  resume {src}"
+        detail += f" zone={zone}" if zone else " zone=ALL"
     elif event_code in (4, 5, 6):
         phase = "CLEARED" if additional[0] else "APPEARED"
         detail = f"  {phase}"
