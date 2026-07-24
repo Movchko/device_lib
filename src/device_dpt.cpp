@@ -219,13 +219,14 @@ void VDeviceDPT::SetStatus() {
 
 void VDeviceDPT::Timer1ms() {
     Counter1s++;
+
+    /* Сначала фильтр линии — секундный SetStatus только с подтверждённым LineState. */
+    Process();  // внутри Process -> UpdateLineStateFiltered -> prevLineState
+
     if (Counter1s >= 1000) {
         SetStatus();
         Counter1s = 0;
     }
-
-    /* Обновляем состояние линии (по сопротивлению или по MAX, в зависимости от measureModeIsMax/useMax) */
-    Process();  // внутри Process -> UpdateLineStateFiltered -> prevLineState
 
     /* Окно стабилизации после пробного включения 24В */
     if (probeAfterShort) {
@@ -414,8 +415,12 @@ void VDeviceDPT::UpdateLineStateFiltered() {
 					SwitchRelayToResMode();
 				}
 				SetStatus();
+				return;
 			}
 		}
+		/* Фильтр ещё не подтвердил смену: наружу (SetStatus / GetLineState)
+		 * только подтверждённое состояние — иначе секундный SetStatus утекает. */
+		LineState = prevLineState;
 	} else {
 		/* Состояние не меняется — сбрасываем фильтр */
 		pendingLineState = prevLineState;
