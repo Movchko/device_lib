@@ -2,6 +2,7 @@
 #ifndef INCLUDE_DEVICE_IGNITER_HPP_
 #define INCLUDE_DEVICE_IGNITER_HPP_
 
+#include <sys/_stdint.h>
 #include "device.hpp"
 #include "device_config.h"
 
@@ -53,7 +54,7 @@ class VDeviceIgniter: public VDevice {
 
 	/* дебаунс 100мс для состояния линии по ADC */
 	uint8_t debounce_candidate;
-	uint8_t debounce_cnt;
+	uint16_t debounce_cnt;
 
 	/* после выключения ШИМ — не доверять ADC 100мс (установка напряжения) */
 	uint8_t pwm_off_cooldown_ms;

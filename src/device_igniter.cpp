@@ -11,6 +11,8 @@
 #define BURN_HOLD_MS         800
 #define BURN_WAIT_MS         50   /* пауза перед проверкой после сброса ШИМ */
 
+#define IGNITER_DEB_MS		300
+
 VDeviceIgniter::VDeviceIgniter(uint8_t ChNum) : VDevice(ChNum) {
 	State = DeviceIgniterState_Idle;
 	Status = DeviceIgniterStatus_Idle;
@@ -122,8 +124,8 @@ void VDeviceIgniter::UpdateLineFromAdcMv(uint16_t adc_mv) {
 		return;
 	}
 	debounce_cnt++;
-	if (debounce_cnt >= 100) {  /* 100 мс стабильно */
-		debounce_cnt = 100;  /* не переполнять */
+	if (debounce_cnt >= IGNITER_DEB_MS) {  /* IGNITER_DEB_MS мс стабильно */
+		debounce_cnt = IGNITER_DEB_MS;  /* не переполнять */
 		DeviceIgniterLineState st = (DeviceIgniterLineState)new_candidate;
 		SetLineState(st);
 	}

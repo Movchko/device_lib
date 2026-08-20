@@ -96,6 +96,11 @@ enum ServiceCmd {
 	/* Виртуальная кнопка → ППКУ: эквивалент нажатия «ПУСК СП» (broadcast, без параметров). */
 	ServiceCmd_Fire_StartSpButton	= 163,
 
+	/* 164..167 — зарезервировано под чтение логов (см. протокол). */
+
+	/* ППКУ → ПК: APPLY конфигов на МКУ завершён успешно (после ConfigSync APPLY). */
+	ServiceCmd_ApplyConfigDone	= 168,
+
 	ServiceCmd_CircSetAdr 		= 200,
 };
 
