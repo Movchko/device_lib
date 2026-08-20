@@ -491,6 +491,10 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t re
 		}break;
 		case ServiceCmd_SaveConfig: { // save config from local
 			App_OnHostConfigCommand(reply_bus, Command);
+			/* 1) flash без смены CAN-адреса
+			 * 2) ACK по текущему (старому) zone/h_adr — иначе ППКУ потеряет ответ
+			 * 3) AplyConfig — после ACK можно сменить zone в BoardDevicesList
+			 * ППКУ после Save ACK переключает current_dev на zone из образа и делает CRC. */
 			SaveConfig();
 			SendMessage(Dev, Command, Data, SEND_NOW, reply_bus);
 			AplyConfig();
