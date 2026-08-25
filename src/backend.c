@@ -65,6 +65,7 @@ __attribute__((weak)) void AplyConfig();
 __attribute__((weak)) void App_OnHostConfigCommand(uint8_t bus, uint8_t command) { (void)bus; (void)command; }
 /* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
 __attribute__((weak)) void CanSendOverError(void) { (void)0; }
+__attribute__((weak)) void App_WriteProgramWatchdog(void) { (void)0; }
 
 uint32_t BackendGetSendOverflowCount(void) {
 	return SendOverflowCount;
@@ -143,6 +144,20 @@ void BackendProcess() {
 		g_stop_retranslate_guard_ms--;
 		if (g_stop_retranslate_guard_ms == 0u) {
 			CanStopRetranslate = 0u;
+		}
+	}
+
+	/* Через 3 с после старта BackendProcess — флаг успешной работы для бутлоадера панели. */
+	{
+		static uint16_t s_app_wd_delay_ms = 0u;
+		static uint8_t s_app_wd_done = 0u;
+		if (s_app_wd_done == 0u) {
+			if (s_app_wd_delay_ms < 3000u) {
+				s_app_wd_delay_ms++;
+			} else {
+				s_app_wd_done = 1u;
+				App_WriteProgramWatchdog();
+			}
 		}
 	}
 

@@ -157,6 +157,30 @@ typedef struct {
 
 Повтор `CAPS_REQ` — при сбое, по таймеру, после `PROFILE_SET`.
 
+### 5.1a. RSP_ACTIVITY (незапрошенный, CMD=0x82, DIR=1, период 1 с)
+
+Шлёт **сама панель** (приложение) или **бутлоадер панели** (`MCU_bootloader_v2`).
+Оба используют **тот же `addr`**, что и приложение панели. Тип устройства — в `dev_type`.
+Пакет нужен ПО для индикации «устройство на шине».
+
+```
+dev_type        u8      RsBusDevType: 0x01=panel_app, 0x02=panel_bootloader, 0x10=psu(резерв)
+fw_ver          u16     LE
+hw_id           u16     LE
+status          u8      как в CAPS (для boot обычно 0)
+uptime_sec      u32     LE, секунды с старта текущего режима
+```
+
+Размер payload: 10 байт (`RS_PANEL_ACTIVITY_PAYLOAD_SIZE`).
+
+Пути доставки в ПО:
+- **Прямой RS485**: внешнее устройство на той же шине видит кадр как есть.
+- **WiFi**: ППКУ прокидывает raw RS-кадр в `BSU_PKT_TYPE_ESP_UART` (USART2 → ESP32).
+
+Обратный путь для обновления прошивки:
+`ПО → ESP → BSU_PKT_TYPE_ESP_UART → ППКУ → raw RS на USART1`
+(команды 128/156/158/159, ответы бутлоадера прокидываются обратно тем же типом).
+
 ### 5.2. RSP_CAPS (ответ панели, CMD=0xF0, DIR=1)
 
 ```
@@ -280,6 +304,7 @@ payload зависит от sub:
 | `CAPS_REQ` | `0xF0` | unicast | Запрос возможностей |
 | `PROFILE_SET` | `0xF1` | unicast | Изменение профиля |
 | `PANEL_RESET` | `0xF2` | bcast/ucast | Мягкий сброс UI панели |
+| `ENTER_BOOTLOADER` | `0xF3` | unicast | Вход в бутлоадер: панель пишет в SRAM флаг обновления и свой `rs_addr`, soft-reset. Далее обмен на **том же `addr`** командами 156/158/159/128; ACTIVITY с `dev_type=panel_bootloader` |
 
 ### 7.2. Panel → Master (DIR=1)
 
@@ -713,8 +738,11 @@ ENTER:
 
 - Другие типы RS-устройств (не панели).
 - Прокси CAN через RS485.
-- Обновление прошивки панели по RS485.
 - Шифрование / аутентификация.
+
+Реализовано после v0.3:
+- `RSP_ACTIVITY` (1 Гц) от приложения панели и бутлоадера.
+- Прокидка `ACTIVITY` и boot-кадров RS ↔ `BSU_PKT_TYPE_ESP_UART` на ППКУ 2.
 
 ---
 
@@ -725,3 +753,6 @@ ENTER:
 | 0.1 | 2026-07-09 | Первичный черновик: POLL, FIRE_UI, WARN, LED, SOUND |
 | 0.2 | 2026-07-09 | Типы кнопок/LED, семантический UI, CAPS, несколько панелей |
 | 0.3 | 2026-07-13 | Журнал постранично, state machine меню, PROFILE_SET, блокировка hw_id, дедупликация 500 мс, 460800 бод, фрагментация, итоговая спецификация |
+| 0.4 | 2026-08-25 | RSP_ACTIVITY 1 Гц (app/bootloader), мост RS↔ESP_UART для presence и FW update |
+| 0.5 | 2026-08-25 | ENTER_BOOTLOADER `0xF3`: вход приложения в бут (SRAM-флаг + soft-reset), обновление на `0xFD` |
+| 0.6 | 2026-08-25 | Бут на том же `addr`, что панель; ACTIVITY.dev_type = RsBusDevType (panel_app / panel_bootloader / psu) |

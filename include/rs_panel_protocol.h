@@ -30,10 +30,36 @@ typedef enum {
     RS_PANEL_CMD_CAPS_REQ    = 0xF0u,
     RS_PANEL_CMD_PROFILE_SET = 0xF1u,
     RS_PANEL_CMD_PANEL_RESET = 0xF2u,
+    /* Вход в бутлоадер: приложение пишет SRAM-флаг (+ rs_addr) и soft-reset.
+     * Бут отвечает на том же RS-адресе, что и приложение панели. */
+    RS_PANEL_CMD_ENTER_BOOTLOADER = 0xF3u,
+    /* Команды обновления прошивки панели (совпадают с ServiceCmd МКУ).
+     * Unicast на адрес панели; тип в ACTIVITY = PANEL_BOOTLOADER. */
+    RS_PANEL_CMD_BOOT_RESET_MCU      = 128u,
+    RS_PANEL_CMD_BOOT_SET_UPD_WORD = 156u,
+    RS_PANEL_CMD_BOOT_UPD_TRANSMIT = 158u,
+    RS_PANEL_CMD_BOOT_GET_VERSION    = 159u,
     RS_PANEL_RSP_POLL        = 0x81u,
+    /* Незапрошенный пакет активности (1 Гц): тип устройства в payload.dev_type. */
+    RS_PANEL_RSP_ACTIVITY    = 0x82u,
     RS_PANEL_RSP_CAPS        = 0xF0u,
     RS_PANEL_RSP_ACK         = 0xFEu
 } RsPanelCommand;
+
+/* Тип устройства на общей RS-шине (поле ACTIVITY.dev_type).
+ * Адрес (addr) уникален на шине; тип отличает роль и класс устройства. */
+typedef enum {
+    RS_BUS_DEV_TYPE_PANEL_APP        = 0x01u, /* приложение панели */
+    RS_BUS_DEV_TYPE_PANEL_BOOTLOADER = 0x02u, /* бутлоадер панели */
+    RS_BUS_DEV_TYPE_PSU              = 0x10u  /* блок питания (резерв) */
+} RsBusDevType;
+
+#define RS_PANEL_DEV_KIND_APP        RS_BUS_DEV_TYPE_PANEL_APP
+#define RS_PANEL_DEV_KIND_BOOTLOADER RS_BUS_DEV_TYPE_PANEL_BOOTLOADER
+typedef RsBusDevType RsPanelDevKind;
+
+#define RS_PANEL_ACTIVITY_PAYLOAD_SIZE 10u
+
 
 typedef enum {
     RS_PANEL_BTN_ESC = 0x01u,
@@ -146,6 +172,14 @@ typedef enum {
 } RsProfileSetSub;
 
 typedef struct {
+    uint8_t dev_type;    /* RsBusDevType */
+    uint16_t fw_ver;
+    uint16_t hw_id;
+    uint8_t status;      /* bit0=btn_ok, bit1=display_ok (для boot обычно 0) */
+    uint32_t uptime_sec;
+} RsPanelActivity;
+
+typedef struct {
     uint8_t flags;
     uint8_t ack_seq;
 } RsPanelPollReq;
@@ -236,6 +270,9 @@ typedef struct {
         uint8_t journal_lines;
     } value;
 } RsPanelProfileSetCmd;
+
+uint16_t RsPanel_EncodeActivity(uint8_t *dst, uint16_t dst_size, const RsPanelActivity *act);
+uint8_t RsPanel_DecodeActivity(const uint8_t *src, uint16_t src_len, RsPanelActivity *out_act);
 
 uint16_t RsPanel_EncodePollReq(uint8_t *dst, uint16_t dst_size, const RsPanelPollReq *req);
 uint8_t RsPanel_DecodePollReq(const uint8_t *src, uint16_t src_len, RsPanelPollReq *out_req);

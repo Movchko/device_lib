@@ -121,6 +121,11 @@ void ProtocolParse(uint32_t ui32MsgID, uint8_t *pui8MsgData, uint8_t bus);
 
 void BackendProcess(); // необходимо вызывать в главной программе. 1000герц
 
+/* Запись флага успешного старта приложения (watchdog) для бутлоадера панели.
+ * Weak-заглушка в backend.c; сильная реализация — в приложении (ControlBoard).
+ * Не должна перепрограммировать flash, если magic уже записан. */
+__attribute__((weak)) void App_WriteProgramWatchdog(void);
+
 void FireServiceCmd(uint32_t MsgID, uint8_t Command, uint8_t *MsgData, uint8_t bus);
 
 /* положить сообщение в очередь на отравку
