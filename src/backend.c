@@ -1,5 +1,6 @@
 
 #include "backend.h"
+#include "config_crc.h"
 #include "service.h"
 
 uint8_t isMaster = 0;
@@ -456,9 +457,9 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t re
 		case ServiceCmd_GetConfigCRC: { // вернуть контрольную сумму массива конфигурации
 			uint32_t crc = 0;
 			if(MsgData[0] == 0)
-				crc = crc32(POLYNOM, SavedCfgptr, GetConfigSize());
+				crc = MkuCfg_ComputeCrc(SavedCfgptr);
 			else
-				crc = crc32(POLYNOM, LocalCfgptr, GetConfigSize());
+				crc = MkuCfg_ComputeCrc(LocalCfgptr);
 
 			for(uint8_t i = 0; i < 4; i++) {
 				Data[i] = (crc >> (24 - 8 * i)) & 0xFF;
