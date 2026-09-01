@@ -14,6 +14,10 @@ extern "C" {
 #define RS_BUS_MAX_PAYLOAD       512u
 #define RS_BUS_FRAME_OVERHEAD    8u
 #define RS_BUS_MAX_FRAME_SIZE    (2u + 1u + RS_BUS_FRAME_OVERHEAD + RS_BUS_MAX_PAYLOAD)
+/* Поле длины кадра — 1 байт: len_field = 4 + payload. Макс. payload на провод. */
+#define RS_BUS_LEN_FIELD_MAX      255u
+#define RS_BUS_MAX_WIRE_PAYLOAD   (RS_BUS_LEN_FIELD_MAX - 4u) /* 251 */
+#define RS_BUS_RX_DMA_SIZE        288u
 
 typedef enum {
     RS_BUS_FLAG_DIR     = 0x01u,
