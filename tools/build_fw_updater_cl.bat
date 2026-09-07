@@ -52,7 +52,7 @@ if errorlevel 1 (
 )
 
 echo Compiling %SRC% ...
-cl /nologo /EHsc /utf-8 /DUNICODE /D_UNICODE /W3 "%SRC%" /link /SUBSYSTEM:WINDOWS /OUT:"%OUT%" user32.lib gdi32.lib comctl32.lib comdlg32.lib
+cl /nologo /EHsc /utf-8 /DUNICODE /D_UNICODE /W3 "%SRC%" /link /SUBSYSTEM:WINDOWS /OUT:"%OUT%" user32.lib gdi32.lib comctl32.lib comdlg32.lib ws2_32.lib winmm.lib
 
 if errorlevel 1 (
     echo Build failed.

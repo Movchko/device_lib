@@ -527,7 +527,7 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t re
 	}
 }
 
-static void UpdateServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
+static void UpdateServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t reply_bus) {
 
 	switch(Command) {
 		case ServiceCmd_SetUpdateWord: {
@@ -553,7 +553,7 @@ static void UpdateServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData) {
 					for(uint8_t i = 0; i < 4; i++) {
 						Data[i + 3] = (check_word >> (24 - 8 * i)) & 0xFF;
 					}
-					SendMessage(Dev, Command, Data, SEND_NOW, BUS_CAN12);
+					SendMessage(Dev, Command, Data, SEND_NOW, reply_bus);
 				}
 			}
 		}break;
@@ -630,7 +630,7 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 			if(dir & (Dev == 0)) // если от нас и нам, то исключаем (кольцо)
 				return;
 			else
-				UpdateServiceCmd(Dev, Command, MsgData);
+				UpdateServiceCmd(Dev, Command, MsgData, bus);
 		}break;
 		case ServiceCmd_GetVersion: {
 			/* запрос строки версии: N пакетов, в каждом до 6 байт текста */
