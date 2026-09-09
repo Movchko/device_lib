@@ -56,9 +56,16 @@
 #define WIFI_DEFAULT_HOST     L"192.168.4.1"
 #define WIFI_DEFAULT_PORT     L"23"
 
-#define ACK_WAIT_MS_WIFI_NORMAL     400u
-#define ACK_WAIT_MS_WIFI_QUAD       800u
 #define ACK_WAIT_MS_PPKY_FIRST      35000u
+/* Бюджет ожидания пачки: не сумма старых per-word (64×400 мс ≈ 25 с на 1 lost ACK). */
+#define ACK_BATCH_WORD_BUDGET_USB   25u
+#define ACK_BATCH_WORD_BUDGET_WIFI  60u
+#define ACK_BATCH_IDLE_GAP_USB      100u
+#define ACK_BATCH_IDLE_GAP_WIFI     350u
+/* Когда почти вся пачка пришла — подождать отстающий ACK дольше. */
+#define ACK_BATCH_IDLE_GAP_TAIL_USB  300u
+#define ACK_BATCH_IDLE_GAP_TAIL_WIFI 1200u
+#define ACK_BATCH_MIN_MS            500u
 
 #define WM_APP_LOG          (WM_APP + 1)
 #define WM_APP_PACKET       (WM_APP + 2)
@@ -89,9 +96,6 @@
 #define RS_BUS_DEV_TYPE_PANEL_APP        0x01u
 #define RS_BUS_DEV_TYPE_PANEL_BOOTLOADER 0x02u
 #define ENTER_BOOT_WAIT_MS     15000u
-#define ACK_WAIT_MS_FIRST_WORD 2500u
-#define ACK_WAIT_MS_NORMAL     50u
-#define ACK_WAIT_MS_QUAD_FLUSH 200u
 #define ACK_RETRY_FIRST_WORD 4
 #define ACK_RETRY_NORMAL 8
 
@@ -1290,75 +1294,162 @@ static void AckBatchBeginLocked(uint32_t batch_start, uint32_t batch_len, const 
     }
 }
 
-static uint32_t AckTimeoutForWord(uint32_t word_idx) {
-    int wifi = g_useTcp;
-    int ppky = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PPKY_TYPE);
-    int panel = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PANEL_TYPE);
-    if (word_idx == 0u) {
-        if (ppky || panel) return ACK_WAIT_MS_PPKY_FIRST;
-        return wifi ? 8000u : ACK_WAIT_MS_FIRST_WORD;
-    }
-    if ((word_idx & 3u) == 3u) {
-        return wifi ? ACK_WAIT_MS_WIFI_QUAD : ACK_WAIT_MS_QUAD_FLUSH;
-    }
-    return wifi ? ACK_WAIT_MS_WIFI_NORMAL : ACK_WAIT_MS_NORMAL;
+static uint32_t AckBatchWordBudgetMs(void) {
+    return g_useTcp ? ACK_BATCH_WORD_BUDGET_WIFI : ACK_BATCH_WORD_BUDGET_USB;
 }
 
-static int WaitAckSlot(uint32_t slot, uint32_t timeout_ms) {
-    DWORD start = GetTickCount();
-    int ok = 0;
-    EnterCriticalSection(&g_ackCs);
-    while (!g_ack.acked[slot] &&
-           (GetTickCount() - start) < timeout_ms &&
-           !InterlockedCompareExchange(&g_updateStop, 0, 0)) {
-        SleepConditionVariableCS(&g_ackCv, &g_ackCs, 2);
+static uint32_t AckBatchIdleGapMs(uint32_t missing) {
+    /* После хотя бы одного ACK: тишина = конец потока или потеря.
+     * Для 1–2 хвостов ждём дольше — иначе ложный «Повтор … 1 из 64». */
+    if (missing > 0u && missing <= 2u) {
+        return g_useTcp ? ACK_BATCH_IDLE_GAP_TAIL_WIFI : ACK_BATCH_IDLE_GAP_TAIL_USB;
     }
-    ok = g_ack.acked[slot] ? 1 : 0;
+    return g_useTcp ? ACK_BATCH_IDLE_GAP_WIFI : ACK_BATCH_IDLE_GAP_USB;
+}
+
+static uint32_t AckBatchHardTimeoutMs(uint32_t batch_start, uint32_t unacked) {
+    int ppky = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PPKY_TYPE);
+    int panel = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PANEL_TYPE);
+    uint32_t per = AckBatchWordBudgetMs();
+    uint32_t t;
+
+    if (unacked == 0u) {
+        return ACK_BATCH_MIN_MS;
+    }
+    t = ACK_BATCH_MIN_MS + unacked * per;
+    /* Слово 0 ППКУ/панели: erase SPI до ~35 с — только для первой пачки. */
+    if (batch_start == 0u && (ppky || panel)) {
+        uint32_t rest = (unacked > 1u) ? ((unacked - 1u) * per) : 0u;
+        uint32_t first = ACK_WAIT_MS_PPKY_FIRST + rest;
+        if (first > t) {
+            t = first;
+        }
+    } else if (batch_start == 0u && g_useTcp) {
+        uint32_t first = 8000u + ((unacked > 1u) ? ((unacked - 1u) * per) : 0u);
+        if (first > t) {
+            t = first;
+        }
+    }
+    return t;
+}
+
+/* Ждём ACK всей пачки. Если поток ACK оборвался (тишина idle_gap) —
+ * выходим сразу и шлём только недостающие слова, без ожидания 64×400 мс. */
+static int WaitAckBatch(uint32_t batch_start) {
+    DWORD start = GetTickCount();
+    DWORD last_progress = start;
+    uint32_t last_count;
+    uint32_t hard_tmo;
+    int ok = 0;
+
+    EnterCriticalSection(&g_ackCs);
+    last_count = g_ack.acked_count;
+    hard_tmo = AckBatchHardTimeoutMs(batch_start, g_ack.batch_len - g_ack.acked_count);
+
+    while (g_ack.acked_count < g_ack.batch_len &&
+           !InterlockedCompareExchange(&g_updateStop, 0, 0)) {
+        DWORD now = GetTickCount();
+        uint32_t missing = g_ack.batch_len - g_ack.acked_count;
+        uint32_t idle_gap = AckBatchIdleGapMs(missing);
+
+        if ((now - start) >= hard_tmo) {
+            break;
+        }
+        /* Уже есть часть ACK, но новые не приходят — потеря кадра, не ждём потолок. */
+        if (g_ack.acked_count > 0u && (now - last_progress) >= idle_gap) {
+            break;
+        }
+        SleepConditionVariableCS(&g_ackCv, &g_ackCs, 2);
+        now = GetTickCount();
+        if (g_ack.acked_count > last_count) {
+            last_count = g_ack.acked_count;
+            last_progress = now;
+        }
+    }
+    ok = (g_ack.acked_count >= g_ack.batch_len) ? 1 : 0;
     LeaveCriticalSection(&g_ackCs);
     return ok;
 }
 
+static int SendUnackedBatchWords(const DeviceInfo *dev, uint32_t can_id, uint32_t batch_start,
+                                 const uint32_t *batch_words) {
+    uint8_t already[MAX_BATCH_SIZE];
+    uint32_t n;
+    uint32_t j;
+    EnterCriticalSection(&g_ackCs);
+    n = g_ack.batch_len;
+    memcpy(already, g_ack.acked, n);
+    LeaveCriticalSection(&g_ackCs);
+
+    for (j = 0; j < n; j++) {
+        if (already[j]) {
+            continue;
+        }
+        if (InterlockedCompareExchange(&g_updateStop, 0, 0)) {
+            return 0;
+        }
+        if (!SendUpdateWord(dev, can_id, batch_start + j, batch_words[j])) {
+            Logf(L"Ошибка отправки слова %u (err=%u)\r\n", batch_start + j, g_lastIoError);
+            return 0;
+        }
+        /* WiFi: чуть разгрузить мост ESP (иначе ACK+CAN зеркало дропаются в stream). */
+        if (g_useTcp && ((j + 1u) % 8u) == 0u) {
+            Sleep(1);
+        }
+    }
+    return 1;
+}
+
 static int RunVerifyBatch(const DeviceInfo *dev, uint32_t can_id, uint32_t batch_start, uint32_t batch_len,
                           const uint32_t *batch_words) {
+    int max_retries = (batch_start == 0u) ? ACK_RETRY_FIRST_WORD : ACK_RETRY_NORMAL;
+    int attempt;
+
     EnterCriticalSection(&g_ackCs);
     AckBatchBeginLocked(batch_start, batch_len, batch_words);
     LeaveCriticalSection(&g_ackCs);
 
-    /* Внутри пачки: отправили слово → дождались ACK → следующее.
-     * Иначе мост/UART и МКУ не успевают на словах 2–3 и на quad-flush (3,7,11…). */
-    for (uint32_t j = 0; j < batch_len; j++) {
-        uint32_t wi = batch_start + j;
-        uint32_t tmo = AckTimeoutForWord(wi);
-        int max_retries = (wi == 0u) ? ACK_RETRY_FIRST_WORD : ACK_RETRY_NORMAL;
-        int word_ok = 0;
+    /* Вся пачка уходит подряд, ACK ждём по пачке целиком. Иначе параметр «Пачка»
+     * не влияет на скорость (stop-and-wait по каждому слову). */
+    for (attempt = 0; attempt < max_retries; attempt++) {
+        uint32_t missing;
 
-        for (int attempt = 0; attempt < max_retries && !word_ok; attempt++) {
-            if (InterlockedCompareExchange(&g_updateStop, 0, 0)) goto fail;
-
-            EnterCriticalSection(&g_ackCs);
-            if (g_ack.acked[j]) {
-                word_ok = 1;
-                LeaveCriticalSection(&g_ackCs);
-                break;
-            }
-            LeaveCriticalSection(&g_ackCs);
-
-            if (!SendUpdateWord(dev, can_id, wi, batch_words[j])) {
-                Logf(L"Ошибка отправки слова %u (err=%u)\r\n", wi, g_lastIoError);
-                goto fail;
-            }
-            if (WaitAckSlot(j, tmo)) {
-                word_ok = 1;
-            }
+        if (InterlockedCompareExchange(&g_updateStop, 0, 0)) {
+            goto fail;
         }
 
-        if (!word_ok) {
-            Logf(L"Нет подтверждения для слова %u\r\n", wi);
+        EnterCriticalSection(&g_ackCs);
+        missing = g_ack.batch_len - g_ack.acked_count;
+        LeaveCriticalSection(&g_ackCs);
+        if (missing == 0u) {
+            break;
+        }
+
+        if (attempt > 0) {
+            Logf(L"Повтор пачки %u-%u (нет ACK: %u из %u)\r\n",
+                 batch_start, batch_start + batch_len - 1u, missing, batch_len);
+        }
+
+        if (!SendUnackedBatchWords(dev, can_id, batch_start, batch_words)) {
             goto fail;
+        }
+        if (WaitAckBatch(batch_start)) {
+            break;
         }
     }
 
     EnterCriticalSection(&g_ackCs);
+    if (g_ack.acked_count < g_ack.batch_len) {
+        uint32_t j;
+        for (j = 0; j < g_ack.batch_len; j++) {
+            if (!g_ack.acked[j]) {
+                Logf(L"Нет подтверждения для слова %u\r\n", g_ack.expect_idx[j]);
+                break;
+            }
+        }
+        LeaveCriticalSection(&g_ackCs);
+        goto fail;
+    }
     g_ack.active = 0;
     LeaveCriticalSection(&g_ackCs);
     return 1;
@@ -1498,7 +1589,7 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
     SendMessageW(g_hProgress, PBM_SETRANGE32, 0, total_words);
     SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
     if (ua->verify_packets) {
-        Logf(L"Старт обновления: words=%u, верификация=вкл, пачка=%u%s\r\n",
+        Logf(L"Старт обновления: words=%u, верификация=вкл, пачка=%u (ACK всей пачки)%s\r\n",
              total_words, ua->batch_size, is_panel ? L", RS/ESP_UART" : L"");
         if (ua->dev.d_type == DEVICE_PPKY_TYPE) {
             Logf(L"ППКУ: первое слово может занять до 35 с (стирание SPI).\r\n");

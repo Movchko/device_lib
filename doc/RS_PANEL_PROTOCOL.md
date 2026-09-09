@@ -465,29 +465,32 @@ items[]      n_items × (len u8 + utf8[len])
 
 #### JOURNAL_LIST (0x20)
 
+Экран журнала как на ППКУ 1: одна запись, три строки (верх — бегущая `n/N` + время, центр — тип, низ — зона/источник).
+
 ```
 total           u32   всего записей в логе
 selected_idx    u32   глобальный индекс выделенной записи
 window_first    u32   индекс первой видимой строки
-n_items         u8    строк в пакете (1..journal_lines)
+n_items         u8    всегда 1 для OLED
 items[]         n_items ×:
   rec_idx       u32
-  ts            u32   Unix timestamp (compact)
-  code          u16   код из event_log_catalog
-  text_len      u8
-  text[text_len]      краткий текст, max 48
+  ts            u32
+  code          u16
+  header_len    u8 + header[]   /* "n/N DD.MM.YY HH:MM", max 31 */
+  title_len     u8 + title[]    /* тип события, max 23 */
+  detail_len    u8 + detail[]   /* зона и источник, max 120 */
 ```
 
 Навигация:
 
 | Событие | Действие ППКУ 2 |
 |---------|-----------------|
-| UP | `selected_idx--`, сдвиг `window_first` при необходимости |
-| DOWN | `selected_idx++`, сдвиг окна |
-| ENTER | открыть `JOURNAL_DETAIL` для `rec_idx == selected_idx` |
-| ESC | `UI_NAV(BACK)` |
+| UP | новее (`selected_idx++`) |
+| DOWN | старее (`selected_idx--`) |
+| ENTER | к новейшей записи (`selected = total-1`), тот же экран |
+| ESC | назад в MENU_ROOT |
 
-После каждого изменения — новый `JOURNAL_LIST`.
+После каждого изменения — новый `JOURNAL_LIST`. `JOURNAL_DETAIL` для этого экрана не используется.
 
 #### JOURNAL_DETAIL (0x21)
 

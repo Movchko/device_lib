@@ -113,7 +113,21 @@ from bus_monitor import (
     IGNITER_LINE,
 )
 
-from ppky_log_stream import BsuLogFrameParser, PpkyLogClient, can_frame_from_bsu_body, build_log_request, LOG_PKT_TYPE_RSP, LOG_PKT_TYPE_DATA
+from ppky_log_stream import (
+    BsuLogFrameParser,
+    PpkyLogClient,
+    can_frame_from_bsu_body,
+    build_log_request,
+    decode_rs_bus_frame,
+    LOG_PKT_TYPE_RSP,
+    LOG_PKT_TYPE_DATA,
+    BSU_PKT_TYPE_ESP_UART,
+    RS_BUS_FLAG_DIR,
+    RS_PANEL_RSP_ACTIVITY,
+    RS_BUS_DEV_TYPE_PANEL_APP,
+    RS_BUS_DEV_TYPE_PANEL_BOOTLOADER,
+    DEVICE_PANEL_TYPE,
+)
 
 SERVICE_CMD_POSITION_DEVICE = 161
 
@@ -668,6 +682,40 @@ class BusMonitorGUI:
         can1 = self._can_state_letter((can_state_mask >> 2) & 0x03)
         return f"{base_line} C0:{can0} C1:{can1}"
 
+    def _handle_esp_uart_frame(self, body: bytes):
+        """BSU type 5: raw RS-кадр панели. ACTIVITY (0x82) — присутствие на шине."""
+        rs = decode_rs_bus_frame(body)
+        if not rs:
+            return
+        if (rs["flags"] & RS_BUS_FLAG_DIR) == 0:
+            return
+        if rs["cmd"] != RS_PANEL_RSP_ACTIVITY:
+            return
+        pl = rs["payload"]
+        if len(pl) < 10:
+            return
+        dev_type = pl[0]
+        fw_ver = pl[1] | (pl[2] << 8)
+        hw_id = pl[3] | (pl[4] << 8)
+        status = pl[5]
+        uptime = pl[6] | (pl[7] << 8) | (pl[8] << 16) | (pl[9] << 24)
+        if dev_type == RS_BUS_DEV_TYPE_PANEL_BOOTLOADER:
+            kind = "bootloader"
+        elif dev_type == RS_BUS_DEV_TYPE_PANEL_APP:
+            kind = "app"
+        else:
+            kind = f"dev=0x{dev_type:02X}"
+        line = (
+            f"Панель addr={rs['addr']} {kind} fw={fw_ver} hw=0x{hw_id:04X} "
+            f"status=0x{status:02X} up={uptime}s"
+        )
+        key = (DEVICE_PANEL_TYPE, 0, rs["addr"], 0, -1)
+        self.device_statuses[key] = (line, time.time())
+        self._pps_packets_in_window += 1
+        if not self._refresh_pending:
+            self._refresh_pending = True
+            self.msg_queue.put({"refresh_status": True})
+
     def _update_device_status(self, can_id: int, data: bytes):
         """Обновить последний статус устройства (только dir=1 — ответы от устройств)."""
         p = parse_can_id(can_id)
@@ -1110,6 +1158,9 @@ class BusMonitorGUI:
                     if pkt_type in (LOG_PKT_TYPE_RSP, LOG_PKT_TYPE_DATA):
                         self.log_packets.put(frame)
                         self._log_rx_total += 1
+                        continue
+                    if pkt_type == BSU_PKT_TYPE_ESP_UART:
+                        self._handle_esp_uart_frame(body)
                         continue
                     if pkt_type not in (0, 1):
                         continue

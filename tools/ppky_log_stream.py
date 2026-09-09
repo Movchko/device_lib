@@ -22,6 +22,14 @@ BSU_LOG_BODY_MAX = 246
 LOG_PKT_TYPE_REQ = 16
 LOG_PKT_TYPE_RSP = 17
 LOG_PKT_TYPE_DATA = 18
+BSU_PKT_TYPE_ESP_UART = 5
+
+RS_BUS_PREAMBLE = (0xA5, 0x5A)
+RS_BUS_FLAG_DIR = 0x01
+RS_PANEL_RSP_ACTIVITY = 0x82
+RS_BUS_DEV_TYPE_PANEL_APP = 0x01
+RS_BUS_DEV_TYPE_PANEL_BOOTLOADER = 0x02
+DEVICE_PANEL_TYPE = 30
 
 LOG_OPCODE_PING = 0x01
 LOG_OPCODE_GET_INFO = 0x02
@@ -162,10 +170,38 @@ def can_frame_from_bsu_body(body: bytes) -> tuple[int, bytes, str] | None:
     return can_id, data, "CAN1"
 
 
-class BsuLogFrameParser:
-    """Парсер входящих BSU-кадров (type 0/1/17/18, размер до 256 байт)."""
+def decode_rs_bus_frame(src: bytes) -> dict | None:
+    """Разбор raw RS-кадра панели (как RsFrameDecode в fw_updater_gui.c)."""
+    if src is None or len(src) < 9:
+        return None
+    if src[0] != RS_BUS_PREAMBLE[0] or src[1] != RS_BUS_PREAMBLE[1]:
+        return None
+    len_field = src[2]
+    if len_field < 4:
+        return None
+    total = 2 + 1 + len_field + 2
+    if len(src) < total:
+        return None
+    payload_len = len_field - 4
+    crc_off = 3 + len_field
+    rx_crc = src[crc_off] | (src[crc_off + 1] << 8)
+    calc_crc = sum(src[3:3 + len_field]) & 0xFFFF
+    if rx_crc != calc_crc:
+        return None
+    payload = bytes(src[7:7 + payload_len]) if payload_len else b""
+    return {
+        "addr": src[3],
+        "seq": src[4],
+        "flags": src[5],
+        "cmd": src[6],
+        "payload": payload,
+    }
 
-    ACCEPT_TYPES = (0, 1, 17, 18)
+
+class BsuLogFrameParser:
+    """Парсер входящих BSU-кадров (type 0/1/5/17/18, размер до 256 байт)."""
+
+    ACCEPT_TYPES = (0, 1, BSU_PKT_TYPE_ESP_UART, 17, 18)
 
     def __init__(self):
         self.state = "PREAMBLE_0"
