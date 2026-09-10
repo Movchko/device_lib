@@ -11,8 +11,8 @@ extern "C" {
 #define RS_PANEL_MAX_PANELS          8u
 #define RS_PANEL_MAX_CAPS_BUTTONS    16u
 #define RS_PANEL_MAX_CAPS_LEDS       16u
-#define RS_PANEL_MAX_POLL_BTN_EVENTS 8u
-#define RS_PANEL_MAX_POLL_UI_EVENTS  8u
+#define RS_PANEL_MAX_POLL_BTN_EVENTS 16u
+#define RS_PANEL_MAX_POLL_UI_EVENTS  16u
 #define RS_PANEL_MAX_LED_ITEMS       16u
 
 typedef enum {
@@ -30,7 +30,7 @@ typedef enum {
     RS_PANEL_CMD_CAPS_REQ    = 0xF0u,
     RS_PANEL_CMD_PROFILE_SET = 0xF1u,
     RS_PANEL_CMD_PANEL_RESET = 0xF2u,
-    /* Вход в бутлоадер: приложение пишет SRAM-флаг (+ rs_addr) и soft-reset.
+    /* Вход в бутлоадер: приложение пишет TAMP BKP-флаг (+ rs_addr) и soft-reset.
      * Бут отвечает на том же RS-адресе, что и приложение панели. */
     RS_PANEL_CMD_ENTER_BOOTLOADER = 0xF3u,
     /* Команды обновления прошивки панели (совпадают с ServiceCmd МКУ).

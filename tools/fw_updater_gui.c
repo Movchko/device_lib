@@ -65,7 +65,14 @@
 /* Когда почти вся пачка пришла — подождать отстающий ACK дольше. */
 #define ACK_BATCH_IDLE_GAP_TAIL_USB  300u
 #define ACK_BATCH_IDLE_GAP_TAIL_WIFI 1200u
+/* Панель: erase/program — короткий idle даёт ложные «Повтор пачки». */
+#define ACK_BATCH_IDLE_GAP_PANEL_WIFI      2500u
+#define ACK_BATCH_IDLE_GAP_PANEL_TAIL_WIFI 5000u
+#define PANEL_WORD_PACE_MS_WIFI     30u
+#define PANEL_MAX_BATCH_SIZE        8u
+#define PANEL_TRANSMIT_WAIT_MS      20000u
 #define ACK_BATCH_MIN_MS            500u
+#define ACK_RETRY_GAP_PANEL_MS      150u
 
 #define WM_APP_LOG          (WM_APP + 1)
 #define WM_APP_PACKET       (WM_APP + 2)
@@ -176,6 +183,8 @@ static uint8_t g_rsTxSeq = 1;
 static uint8_t g_espUartSeq = 0;
 static volatile LONG g_panelBootSeen = 0;
 static volatile LONG g_panelEnterAcked = 0;
+static volatile LONG g_panelTransmitSeen = 0;
+static volatile LONG g_panelTransmitOk = 0;
 static volatile uint8_t g_panelWaitAddr = 0;
 
 static void AppendLog(const wchar_t *msg) {
@@ -658,6 +667,15 @@ static DWORD WINAPI ReaderThreadProc(LPVOID arg) {
                                 if (is_dir && rs_cmd == RS_PANEL_RSP_ACK &&
                                     rs_addr == g_panelWaitAddr) {
                                     InterlockedExchange(&g_panelEnterAcked, 1);
+                                }
+                                if (is_dir && rs_cmd == CMD_UPDATE_TRANSMIT &&
+                                    rs_addr == g_panelWaitAddr) {
+                                    InterlockedExchange(&g_panelTransmitSeen, 1);
+                                    if (rs_pl && rs_plen >= 1u && rs_pl[0] == 1u) {
+                                        InterlockedExchange(&g_panelTransmitOk, 1);
+                                    } else {
+                                        InterlockedExchange(&g_panelTransmitOk, 0);
+                                    }
                                 }
                                 int is_ack_packet = (is_dir && rs_cmd == CMD_SET_UPDATE_WORD);
                                 if (!InterlockedCompareExchange(&g_updateRunning, 0, 0) || !is_ack_packet) {
@@ -1299,8 +1317,15 @@ static uint32_t AckBatchWordBudgetMs(void) {
 }
 
 static uint32_t AckBatchIdleGapMs(uint32_t missing) {
+    int panel = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PANEL_TYPE);
     /* После хотя бы одного ACK: тишина = конец потока или потеря.
      * Для 1–2 хвостов ждём дольше — иначе ложный «Повтор … 1 из 64». */
+    if (panel && g_useTcp) {
+        if (missing > 0u && missing <= 2u) {
+            return ACK_BATCH_IDLE_GAP_PANEL_TAIL_WIFI;
+        }
+        return ACK_BATCH_IDLE_GAP_PANEL_WIFI;
+    }
     if (missing > 0u && missing <= 2u) {
         return g_useTcp ? ACK_BATCH_IDLE_GAP_TAIL_WIFI : ACK_BATCH_IDLE_GAP_TAIL_USB;
     }
@@ -1392,8 +1417,11 @@ static int SendUnackedBatchWords(const DeviceInfo *dev, uint32_t can_id, uint32_
             Logf(L"Ошибка отправки слова %u (err=%u)\r\n", batch_start + j, g_lastIoError);
             return 0;
         }
-        /* WiFi: чуть разгрузить мост ESP (иначе ACK+CAN зеркало дропаются в stream). */
-        if (g_useTcp && ((j + 1u) % 8u) == 0u) {
+        /* Панель RS/WiFi: не заливать inject-очередь ППКУ и RX бутлоадера. */
+        if (IsPanelDev(dev) && g_useTcp) {
+            Sleep(PANEL_WORD_PACE_MS_WIFI);
+        } else if (g_useTcp && ((j + 1u) % 8u) == 0u) {
+            /* WiFi CAN: чуть разгрузить мост ESP. */
             Sleep(1);
         }
     }
@@ -1426,8 +1454,16 @@ static int RunVerifyBatch(const DeviceInfo *dev, uint32_t can_id, uint32_t batch
         }
 
         if (attempt > 0) {
-            Logf(L"Повтор пачки %u-%u (нет ACK: %u из %u)\r\n",
-                 batch_start, batch_start + batch_len - 1u, missing, batch_len);
+            /* Не спамить лог на каждый retry — иначе конец обновления не видно. */
+            if (attempt == 1 || (attempt % 2) == 0 || attempt + 1 == max_retries) {
+                Logf(L"Повтор пачки %u-%u (нет ACK: %u из %u, попытка %d/%d)\r\n",
+                     batch_start, batch_start + batch_len - 1u, missing, batch_len,
+                     attempt + 1, max_retries);
+            }
+            /* Дать RS/ESP дойти ACK и не столкнуть следующий quad поверх дырки. */
+            if (IsPanelDev(dev) && g_useTcp) {
+                Sleep(ACK_RETRY_GAP_PANEL_MS);
+            }
         }
 
         if (!SendUnackedBatchWords(dev, can_id, batch_start, batch_words)) {
@@ -1499,6 +1535,8 @@ static int UpdaterAllocFailedCleanup(uint8_t *fw_buf, uint8_t *batch_buf, uint32
 
 static int WaitPanelEnterBoot(uint8_t rs_addr, uint8_t already_boot) {
     DWORD start;
+    DWORD last_send;
+    int send_count = 0;
     if (already_boot == RS_BUS_DEV_TYPE_PANEL_BOOTLOADER) {
         Logf(L"Панель уже в бутлоадере (RS=%u).\r\n", rs_addr);
         return 1;
@@ -1511,17 +1549,69 @@ static int WaitPanelEnterBoot(uint8_t rs_addr, uint8_t already_boot) {
         Logf(L"Не удалось отправить 0xF3.\r\n");
         return 0;
     }
-    start = GetTickCount();
+    send_count = 1;
+    last_send = GetTickCount();
+    start = last_send;
     while ((GetTickCount() - start) < ENTER_BOOT_WAIT_MS &&
            !InterlockedCompareExchange(&g_updateStop, 0, 0)) {
         if (InterlockedCompareExchange(&g_panelBootSeen, 0, 0)) {
             Logf(L"Панель в бутлоадере (ACTIVITY).\r\n");
             return 1;
         }
+        /* Повтор каждые 1 с: единичный кадр через WiFi/ППКУ часто теряется. */
+        if ((GetTickCount() - last_send) >= 1000u) {
+            if (SendPanelRsCmd(rs_addr, CMD_ENTER_BOOTLOADER, NULL, 0)) {
+                send_count++;
+                Logf(L"Повтор 0xF3 (%d), ACK=%ld.\r\n",
+                     send_count,
+                     InterlockedCompareExchange(&g_panelEnterAcked, 0, 0));
+            }
+            last_send = GetTickCount();
+        }
         Sleep(20);
     }
     if (InterlockedCompareExchange(&g_updateStop, 0, 0)) return 0;
-    Logf(L"Таймаут ожидания бутлоадера панели.\r\n");
+    Logf(L"Таймаут ожидания бутлоадера панели (отправok=%d, ACK=%ld).\r\n",
+         send_count,
+         InterlockedCompareExchange(&g_panelEnterAcked, 0, 0));
+    return 0;
+}
+
+static int WaitPanelTransmit(uint8_t rs_addr) {
+    DWORD start;
+    DWORD last_send;
+    int send_count = 0;
+    InterlockedExchange(&g_panelTransmitSeen, 0);
+    InterlockedExchange(&g_panelTransmitOk, 0);
+    g_panelWaitAddr = rs_addr;
+    Logf(L"Отправка UPDATE_TRANSMIT (0x%02X) на RS=%u.\r\n", CMD_UPDATE_TRANSMIT, rs_addr);
+    if (!SendPanelRsCmd(rs_addr, CMD_UPDATE_TRANSMIT, NULL, 0)) {
+        Logf(L"Не удалось отправить UPDATE_TRANSMIT.\r\n");
+        return 0;
+    }
+    send_count = 1;
+    last_send = GetTickCount();
+    start = last_send;
+    while ((GetTickCount() - start) < PANEL_TRANSMIT_WAIT_MS &&
+           !InterlockedCompareExchange(&g_updateStop, 0, 0)) {
+        if (InterlockedCompareExchange(&g_panelTransmitSeen, 0, 0)) {
+            if (InterlockedCompareExchange(&g_panelTransmitOk, 0, 0)) {
+                Logf(L"UPDATE_TRANSMIT OK — образ принят, переход в приложение.\r\n");
+                return 1;
+            }
+            Logf(L"UPDATE_TRANSMIT NACK — CRC/образ невалиден, панель остаётся в бутлоадере.\r\n");
+            return 0;
+        }
+        if ((GetTickCount() - last_send) >= 2000u) {
+            if (SendPanelRsCmd(rs_addr, CMD_UPDATE_TRANSMIT, NULL, 0)) {
+                send_count++;
+                Logf(L"Повтор UPDATE_TRANSMIT (%d).\r\n", send_count);
+            }
+            last_send = GetTickCount();
+        }
+        Sleep(20);
+    }
+    Logf(L"Таймаут UPDATE_TRANSMIT (отправok=%d) — ответ бута не получен.\r\n", send_count);
     return 0;
 }
 
@@ -1574,6 +1664,7 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
     if (is_panel) {
         g_panelWaitAddr = ua->dev.l_adr;
         if (!WaitPanelEnterBoot(ua->dev.l_adr, ua->dev.rs_dev_type)) {
+            Logf(L"ИТОГ: ОШИБКА — панель не вошла в бутлоадер.\r\n");
             free(buf);
             timeEndPeriod(1);
             EnterCriticalSection(&g_ackCs);
@@ -1584,6 +1675,13 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
             PostMessageW(g_hwnd, WM_APP_UPD_DONE, 0, 0);
             return 0;
         }
+        if (ua->batch_size > PANEL_MAX_BATCH_SIZE) {
+            Logf(L"Панель WiFi/RS: пачка ограничена до %u (было %u).\r\n",
+                 PANEL_MAX_BATCH_SIZE, ua->batch_size);
+            ua->batch_size = PANEL_MAX_BATCH_SIZE;
+        }
+        Logf(L"Панель: первое слово — erase flash (до ~35 с), дальше пачками по %u.\r\n",
+             ua->batch_size);
     }
 
     SendMessageW(g_hProgress, PBM_SETRANGE32, 0, total_words);
@@ -1626,7 +1724,19 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
         int batch_ok = 0;
         int is_ppky = (ua->dev.d_type == DEVICE_PPKY_TYPE);
         if (ua->verify_packets) {
-            batch_ok = RunVerifyBatch(&ua->dev, can_id_req, batch_start, batch_len, batch_words);
+            /* Панель: слово 0 = erase flash до ~35 с. Не слать остальную пачку
+             * до ACK слова 0 — иначе кадры копятся в RX бутлоадера под POLL/erase. */
+            if (is_panel && batch_start == 0u && batch_len > 1u) {
+                Logf(L"Панель: сначала слово 0 (erase), затем пачка 1..%u.\r\n",
+                     batch_len - 1u);
+                batch_ok = RunVerifyBatch(&ua->dev, can_id_req, 0u, 1u, batch_words);
+                if (batch_ok) {
+                    batch_ok = RunVerifyBatch(&ua->dev, can_id_req, 1u, batch_len - 1u,
+                                              batch_words + 1u);
+                }
+            } else {
+                batch_ok = RunVerifyBatch(&ua->dev, can_id_req, batch_start, batch_len, batch_words);
+            }
         } else if (is_panel || is_ppky) {
             /* ППКУ на слово 0 стирает SPI: пачка 64 кадра на COM часто не уходит целиком,
              * а без паузы следующие слова теряются, пока идёт erase. */
@@ -1671,15 +1781,27 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
 
     if (!InterlockedCompareExchange(&g_updateStop, 0, 0) && batch_start >= total_words) {
         if (is_panel) {
-            (void)SendPanelRsCmd(ua->dev.l_adr, CMD_UPDATE_TRANSMIT, NULL, 0);
+            if (WaitPanelTransmit(ua->dev.l_adr)) {
+                Logf(L"ИТОГ: УСПЕХ — прошивка панели записана и запущена.\r\n");
+            } else {
+                Logf(L"ИТОГ: ОШИБКА — слова переданы, но старт приложения не подтверждён.\r\n");
+                Logf(L"Панель, скорее всего, в бутлоадере; нужен повторный update _builder.bin.\r\n");
+            }
         } else {
             uint8_t endd[8] = { CMD_UPDATE_TRANSMIT, 0, 0, 0, 0, 0, 0, 0 };
             SendBsuCanPacket(can_id_req, endd, BSU_PKT_TYPE_CAN1);
+            Logf(L"Команда update_transmit отправлена.\r\n");
+            Logf(L"ИТОГ: передача завершена (words=%u).\r\n", total_words);
         }
-        Logf(L"Команда update_transmit отправлена.\r\n");
-    } else if (!InterlockedCompareExchange(&g_updateStop, 0, 0)) {
-        Logf(L"Обновление прервано на слове %u из %u, update_transmit не отправлен.\r\n",
+    } else if (InterlockedCompareExchange(&g_updateStop, 0, 0)) {
+        Logf(L"ИТОГ: ОСТАНОВЛЕНО пользователем на слове %u из %u.\r\n",
              batch_start, total_words);
+    } else {
+        Logf(L"ИТОГ: ОШИБКА — прервано на слове %u из %u, update_transmit не отправлен.\r\n",
+             batch_start, total_words);
+        if (is_panel) {
+            Logf(L"Образ панели неполный — устройство останется в бутлоадере до успешного обновления.\r\n");
+        }
     }
 
     free(buf);
@@ -1739,6 +1861,9 @@ static void StartUpdate(void) {
     wcsncpy(ua->file_path, path, MAX_PATH - 1);
     ua->verify_packets = (g_hVerify && SendMessageW(g_hVerify, BM_GETCHECK, 0, 0) == BST_CHECKED);
     ua->batch_size = ReadBatchSizeFromUi();
+    if (ua->dev.d_type == DEVICE_PANEL_TYPE && ua->batch_size > PANEL_MAX_BATCH_SIZE) {
+        ua->batch_size = PANEL_MAX_BATCH_SIZE;
+    }
     InterlockedExchange(&g_updateStop, 0);
     InterlockedExchange(&g_updateRunning, 1);
     EnableWindow(g_hStart, FALSE);

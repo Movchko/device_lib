@@ -109,6 +109,8 @@ EVENT_LOG_NAMES = {
     23: "PANEL_BTN_PRESS",
     24: "COUNTDOWN_PAUSE",
     25: "COUNTDOWN_RESUME",
+    26: "CONFIG_SAVED",
+    27: "ZONE_NAME",
 }
 
 FAULT_CLASS_NAMES = {
@@ -444,6 +446,15 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
         src = "panel" if additional[1] == 0 else ("can" if additional[1] == 1 else f"src={additional[1]}")
         detail = f"  resume {src}"
         detail += f" zone={zone}" if zone else " zone=ALL"
+    elif event_code == 26:
+        detail = f"  named_zones={additional[0]}/{additional[1]}"
+    elif event_code == 27:
+        parsed_hdr = parse_can_id(can_header) if can_header else None
+        zone = parsed_hdr["zone"] if parsed_hdr else 0
+        name_bytes = bytes(can_data) + bytes(additional)
+        name = name_bytes.split(b"\x00")[0].decode("utf-8", errors="replace")
+        detail = f'  zone={zone} name="{name}"'
+        skip_can_payload = True
     elif event_code in (4, 5, 6):
         phase = "CLEARED" if additional[0] else "APPEARED"
         detail = f"  {phase}"
@@ -454,7 +465,7 @@ def format_event_record(logical_idx: int, status: int, tier: int, rec: bytes) ->
         skip_can_payload = True
 
     can_part = ""
-    if can_header != 0:
+    if can_header != 0 and event_code != 27:
         parsed = parse_can_id(can_header)
         dev = format_device(parsed)
         if skip_can_payload or event_code in (4, 5, 6):

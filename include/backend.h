@@ -21,7 +21,7 @@ extern uint8_t USBSndBuf[CDCPKTLEN];
 #define NUM_DEV_IN_MCU 32
 #define MAX_DEVS   NUM_DEV_IN_MCU
 #define SEND_DELAY_MS 5 // задержка между посылками внутри одного устройства. т.е физически не может одно устйроство слать больше 1000 пакетов в секунду
-#define NumSendMsgObj 100 // буфер отсылаемых пакетов
+#define NumSendMsgObj 128 // буфер отсылаемых пакетов
 #define SEND_NOW	1
 
 #define UNIQ_ID_SIZE	32
