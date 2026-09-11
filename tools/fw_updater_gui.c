@@ -49,8 +49,10 @@
 #define BATCH_SLEEP_MS        1u
 
 #define DEVICE_PPKY_TYPE      10u
+#define DEVICE_ESP32_TYPE     11u
 #define DEVICE_PANEL_TYPE     30u
 #define PPKY_FW_MAX_BYTES     (512u * 1024u)
+#define ESP_FW_MAX_BYTES      (960u * 1024u)
 #define PANEL_FW_MAX_BYTES    (256u * 1024u)
 
 #define WIFI_DEFAULT_HOST     L"192.168.4.1"
@@ -83,6 +85,7 @@
 #define VERSION_RETRY_MS    2000u
 
 #define BSU_PKT_TYPE_CAN1      0u
+#define BSU_PKT_TYPE_ESP_CMD   3u
 #define BSU_PKT_TYPE_ESP_CAN   4u
 #define BSU_PKT_TYPE_ESP_UART  5u
 #define BSU_PREAMBLE0          0x55u
@@ -168,7 +171,7 @@ static DeviceInfo g_selectedTargetDev;
 static int g_selectedTargetValid = 0;
 
 typedef struct {
-    uint8_t kind; /* 0=CAN, 1=RS ESP_UART */
+    uint8_t kind; /* 0=CAN, 1=RS ESP_UART, 2=ESP_CMD */
     uint32_t can_id;
     uint8_t data[8];
     uint8_t bus_label;
@@ -181,6 +184,7 @@ typedef struct {
 
 static uint8_t g_rsTxSeq = 1;
 static uint8_t g_espUartSeq = 0;
+static uint16_t g_espCmdSeq = 0;
 static volatile LONG g_panelBootSeen = 0;
 static volatile LONG g_panelEnterAcked = 0;
 static volatile LONG g_panelTransmitSeen = 0;
@@ -280,6 +284,31 @@ static void HandleAckRsFastPath(const uint8_t *payload, uint16_t payload_len) {
     LeaveCriticalSection(&g_ackCs);
 }
 
+static void HandleAckEspCmdFastPath(const uint8_t *payload, uint16_t payload_len) {
+    uint32_t idx;
+    uint32_t word;
+    if (!payload || payload_len < 8u) return;
+    if (payload[0] != CMD_SET_UPDATE_WORD) return;
+    idx = ((uint32_t)payload[1] << 16) | ((uint32_t)payload[2] << 8) | payload[3];
+    word = ((uint32_t)payload[4] << 24) | ((uint32_t)payload[5] << 16) |
+           ((uint32_t)payload[6] << 8) | payload[7];
+
+    EnterCriticalSection(&g_ackCs);
+    if (g_ack.active) {
+        for (uint32_t s = 0; s < g_ack.batch_len; s++) {
+            if (!g_ack.acked[s] &&
+                idx == g_ack.expect_idx[s] &&
+                word == g_ack.expect_word[s]) {
+                g_ack.acked[s] = 1;
+                g_ack.acked_count++;
+                WakeAllConditionVariable(&g_ackCv);
+                break;
+            }
+        }
+    }
+    LeaveCriticalSection(&g_ackCs);
+}
+
 static uint16_t RsChecksum16(const uint8_t *data, uint16_t len) {
     uint32_t sum = 0;
     uint16_t i;
@@ -359,6 +388,33 @@ static int SendBsuEspUart(const uint8_t *rs_frame, uint16_t rs_len) {
     return SerialWrite(pkt, pos);
 }
 
+static int SendBsuEspCmd(const uint8_t *payload, uint16_t payload_len) {
+    uint8_t pkt[BSU_PKT_MAX_SIZE];
+    uint16_t pkt_size;
+    uint16_t pos;
+    uint16_t crc;
+    uint16_t seq;
+    if (!payload || payload_len == 0u || payload_len > ESP_UART_BODY_MAX) return 0;
+    pkt_size = (uint16_t)(8u + payload_len + 2u);
+    if (pkt_size > BSU_PKT_MAX_SIZE) return 0;
+    seq = g_espCmdSeq++;
+    pos = 0;
+    pkt[pos++] = BSU_PREAMBLE0;
+    pkt[pos++] = BSU_PREAMBLE1;
+    pkt[pos++] = (uint8_t)(pkt_size & 0xFF);
+    pkt[pos++] = (uint8_t)(pkt_size >> 8);
+    pkt[pos++] = (uint8_t)(BSU_PKT_TYPE_ESP_CMD & 0xFF);
+    pkt[pos++] = (uint8_t)(BSU_PKT_TYPE_ESP_CMD >> 8);
+    pkt[pos++] = (uint8_t)(seq & 0xFF);
+    pkt[pos++] = (uint8_t)(seq >> 8);
+    memcpy(&pkt[pos], payload, payload_len);
+    pos = (uint16_t)(pos + payload_len);
+    crc = BsuChecksum(pkt, pos);
+    pkt[pos++] = (uint8_t)(crc & 0xFF);
+    pkt[pos++] = (uint8_t)(crc >> 8);
+    return SerialWrite(pkt, pos);
+}
+
 static int SendPanelRsCmd(uint8_t addr, uint8_t cmd, const uint8_t *payload, uint16_t payload_len) {
     uint8_t frame[ESP_UART_BODY_MAX];
     uint16_t n = RsFrameEncode(frame, (uint16_t)sizeof(frame), addr, g_rsTxSeq++, 0u, cmd,
@@ -369,6 +425,10 @@ static int SendPanelRsCmd(uint8_t addr, uint8_t cmd, const uint8_t *payload, uin
 
 static int IsPanelDev(const DeviceInfo *d) {
     return d && d->d_type == DEVICE_PANEL_TYPE;
+}
+
+static int IsEspDev(const DeviceInfo *d) {
+    return d && d->d_type == DEVICE_ESP32_TYPE;
 }
 
 static DWORD g_lastIoError = 0;
@@ -694,6 +754,24 @@ static DWORD WINAPI ReaderThreadProc(LPVOID arg) {
                                     }
                                 }
                             }
+                        } else if (type == BSU_PKT_TYPE_ESP_CMD && body_need >= 1) {
+                            uint8_t cmd = body[0];
+                            int is_ack_packet = (cmd == CMD_SET_UPDATE_WORD && body_need >= 8);
+                            if (is_ack_packet)
+                                HandleAckEspCmdFastPath(body, (uint16_t)body_need);
+                            if (!InterlockedCompareExchange(&g_updateRunning, 0, 0) || !is_ack_packet) {
+                                PostedPacket *pp = (PostedPacket *)malloc(sizeof(PostedPacket));
+                                if (pp) {
+                                    memset(pp, 0, sizeof(*pp));
+                                    pp->kind = 2;
+                                    pp->bus_label = (uint8_t)type;
+                                    if (body_need > 0) {
+                                        uint16_t n = (body_need > 8) ? 8 : (uint16_t)body_need;
+                                        memcpy(pp->data, body, n);
+                                    }
+                                    PostMessageW(g_hwnd, WM_APP_PACKET, 0, (LPARAM)pp);
+                                }
+                            }
                         }
                     }
                     st = S_P0;
@@ -852,6 +930,7 @@ static int FindOrAddDevice(DeviceInfo d) {
 static const wchar_t* DeviceTypeNameW(uint8_t d_type) {
     switch (d_type) {
         case 10: return L"ППКУ";
+        case 11: return L"ESP32";
         case 13: return L"МКУ_IGN";
         case 14: return L"МКУ_TC";
         case 20: return L"МКУ_K1";
@@ -993,6 +1072,7 @@ static void HandleVersionPacket(DeviceInfo *d, const uint8_t *data) {
 
 static int IsUpdatableType(uint8_t d_type) {
     return (d_type == DEVICE_PPKY_TYPE ||
+            d_type == DEVICE_ESP32_TYPE ||
             d_type == DEVICE_PANEL_TYPE ||
             d_type == 13 || d_type == 14 ||
             d_type == 20 || d_type == 21 || d_type == 22 || d_type == 23);
@@ -1014,6 +1094,12 @@ static void RequestDeviceVersion(const DeviceInfo *d) {
     if (IsPanelDev(d)) {
         if (!SendPanelRsCmd(d->l_adr, CMD_GET_VERSION, NULL, 0))
             Logf(L"Не удалось отправить 159 на панель RS=%u (err=%u)\r\n", d->l_adr, g_lastIoError);
+        return;
+    }
+    if (IsEspDev(d)) {
+        uint8_t data[8] = { CMD_GET_VERSION, 0, 0, 0, 0, 0, 0, 0 };
+        if (!SendBsuEspCmd(data, 8))
+            Logf(L"Не удалось отправить 159 на ESP32 (err=%u)\r\n", g_lastIoError);
         return;
     }
     uint32_t can_id_req = BuildCanId(d->d_type, d->h_adr, d->l_adr, d->zone, 0);
@@ -1221,6 +1307,20 @@ static void ForceReadVersions(void) {
     }
 }
 
+static void EnsureEsp32Device(void) {
+    DeviceInfo d = {0};
+    int idx;
+    d.d_type = DEVICE_ESP32_TYPE;
+    d.last_seen_ms = GetTickCount();
+    idx = FindOrAddDevice(d);
+    if (idx < 0) return;
+    g_devices[idx].last_seen_ms = d.last_seen_ms;
+    if (idx >= ListView_GetItemCount(g_hDevices)) AddDeviceToList(idx);
+    else RefreshDeviceListRow(idx);
+    if (!g_devices[idx].version_valid && !g_devices[idx].version_req_sent)
+        PostMessageW(g_hwnd, WM_APP_REQ_VERSION, (WPARAM)idx, 0);
+}
+
 static void RetryIncompleteVersions(void) {
     DWORD now;
     if (!InterlockedCompareExchange(&g_connected, 0, 0)) return;
@@ -1252,6 +1352,9 @@ static void SelectUpdateTarget(void) {
         if (d.d_type == DEVICE_PANEL_TYPE) {
             Logf(L"  панель RS-addr=%u (%s)\r\n", d.l_adr,
                  (d.rs_dev_type == RS_BUS_DEV_TYPE_PANEL_BOOTLOADER) ? L"bootloader" : L"app");
+        }
+        if (d.d_type == DEVICE_ESP32_TYPE) {
+            Logf(L"  ESP32: протокол ESP_CMD (тип 3), файл .bin IDF (не *_builder.bin).\r\n");
         }
     }
 }
@@ -1292,6 +1395,11 @@ static int SendUpdateWord(const DeviceInfo *dev, uint32_t can_id, uint32_t word_
         uint8_t pl[7];
         BuildRsUpdateWordPayload(pl, word_idx, word);
         return SendPanelRsCmd(dev->l_adr, CMD_SET_UPDATE_WORD, pl, 7u);
+    }
+    if (IsEspDev(dev)) {
+        uint8_t payload[8];
+        BuildUpdateWordData(payload, word_idx, word);
+        return SendBsuEspCmd(payload, 8);
     }
     {
         uint8_t payload[8];
@@ -1334,6 +1442,7 @@ static uint32_t AckBatchIdleGapMs(uint32_t missing) {
 
 static uint32_t AckBatchHardTimeoutMs(uint32_t batch_start, uint32_t unacked) {
     int ppky = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PPKY_TYPE);
+    int esp = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_ESP32_TYPE);
     int panel = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PANEL_TYPE);
     uint32_t per = AckBatchWordBudgetMs();
     uint32_t t;
@@ -1342,8 +1451,8 @@ static uint32_t AckBatchHardTimeoutMs(uint32_t batch_start, uint32_t unacked) {
         return ACK_BATCH_MIN_MS;
     }
     t = ACK_BATCH_MIN_MS + unacked * per;
-    /* Слово 0 ППКУ/панели: erase SPI до ~35 с — только для первой пачки. */
-    if (batch_start == 0u && (ppky || panel)) {
+    /* Слово 0 ППКУ/панели/ESP32: erase до ~35 с — только для первой пачки. */
+    if (batch_start == 0u && (ppky || panel || esp)) {
         uint32_t rest = (unacked > 1u) ? ((unacked - 1u) * per) : 0u;
         uint32_t first = ACK_WAIT_MS_PPKY_FIRST + rest;
         if (first > t) {
@@ -1618,6 +1727,7 @@ static int WaitPanelTransmit(uint8_t rs_addr) {
 static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
     UpdaterArgs *ua = (UpdaterArgs *)arg;
     int is_panel = IsPanelDev(&ua->dev);
+    int is_esp = IsEspDev(&ua->dev);
     FILE *fp = _wfopen(ua->file_path, L"rb");
     if (!fp) {
         PostMessageW(g_hwnd, WM_APP_UPD_DONE, 0, 0);
@@ -1635,6 +1745,13 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
     }
     if (ua->dev.d_type == DEVICE_PPKY_TYPE && (unsigned long)fsz > PPKY_FW_MAX_BYTES) {
         Logf(L"Файл ППКУ больше 512 КБ (%ld байт).\r\n", fsz);
+        fclose(fp);
+        PostMessageW(g_hwnd, WM_APP_UPD_DONE, 0, 0);
+        free(ua);
+        return 0;
+    }
+    if (is_esp && (unsigned long)fsz > ESP_FW_MAX_BYTES) {
+        Logf(L"Файл ESP32 больше 960 КБ (%ld байт, лимит слота OTA).\r\n", fsz);
         fclose(fp);
         PostMessageW(g_hwnd, WM_APP_UPD_DONE, 0, 0);
         free(ua);
@@ -1692,6 +1809,9 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
         if (ua->dev.d_type == DEVICE_PPKY_TYPE) {
             Logf(L"ППКУ: первое слово может занять до 35 с (стирание SPI).\r\n");
         }
+        if (is_esp) {
+            Logf(L"ESP32: первое слово может занять до 35 с (стирание OTA-слота).\r\n");
+        }
     } else {
         Logf(L"Старт обновления: words=%u, верификация=выкл, пачка=%u%s\r\n",
              total_words, ua->batch_size, is_panel ? L", RS/ESP_UART" : L"");
@@ -1726,8 +1846,9 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
         if (ua->verify_packets) {
             /* Панель: слово 0 = erase flash до ~35 с. Не слать остальную пачку
              * до ACK слова 0 — иначе кадры копятся в RX бутлоадера под POLL/erase. */
-            if (is_panel && batch_start == 0u && batch_len > 1u) {
-                Logf(L"Панель: сначала слово 0 (erase), затем пачка 1..%u.\r\n",
+            if ((is_panel || is_esp) && batch_start == 0u && batch_len > 1u) {
+                Logf(L"%s: сначала слово 0 (erase), затем пачка 1..%u.\r\n",
+                     is_esp ? L"ESP32" : L"Панель",
                      batch_len - 1u);
                 batch_ok = RunVerifyBatch(&ua->dev, can_id_req, 0u, 1u, batch_words);
                 if (batch_ok) {
@@ -1737,9 +1858,8 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
             } else {
                 batch_ok = RunVerifyBatch(&ua->dev, can_id_req, batch_start, batch_len, batch_words);
             }
-        } else if (is_panel || is_ppky) {
-            /* ППКУ на слово 0 стирает SPI: пачка 64 кадра на COM часто не уходит целиком,
-             * а без паузы следующие слова теряются, пока идёт erase. */
+        } else if (is_panel || is_ppky || is_esp) {
+            /* ППКУ/ESP на слово 0 стирают слот: пачка без паузы теряется. */
             batch_ok = 1;
             for (uint32_t j = 0; j < batch_len; j++) {
                 if (!SendUpdateWord(&ua->dev, can_id_req, batch_start + j, batch_words[j])) {
@@ -1748,8 +1868,9 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
                          batch_start + j, g_lastIoError);
                     break;
                 }
-                if (is_ppky && (batch_start + j) == 0u) {
-                    Logf(L"Слово 0: пауза 8 с на стирание SPI-слота ППКУ.\r\n");
+                if ((is_ppky || is_esp) && (batch_start + j) == 0u) {
+                    Logf(L"Слово 0: пауза 8 с на стирание слота %s.\r\n",
+                         is_esp ? L"ESP32 OTA" : L"SPI ППКУ");
                     Sleep(8000);
                 }
             }
@@ -1787,6 +1908,12 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
                 Logf(L"ИТОГ: ОШИБКА — слова переданы, но старт приложения не подтверждён.\r\n");
                 Logf(L"Панель, скорее всего, в бутлоадере; нужен повторный update _builder.bin.\r\n");
             }
+        } else if (is_esp) {
+            uint8_t endd[8] = { CMD_UPDATE_TRANSMIT, 0, 0, 0, 0, 0, 0, 0 };
+            SendBsuEspCmd(endd, 8);
+            Logf(L"Команда update_transmit отправлена на ESP32 (ESP_CMD).\r\n");
+            Logf(L"ИТОГ: передача завершена (words=%u). ESP32 перезагрузится в новый образ.\r\n",
+                 total_words);
         } else {
             uint8_t endd[8] = { CMD_UPDATE_TRANSMIT, 0, 0, 0, 0, 0, 0, 0 };
             SendBsuCanPacket(can_id_req, endd, BSU_PKT_TYPE_CAN1);
@@ -1844,6 +1971,10 @@ static void StartUpdate(void) {
             MessageBoxW(g_hwnd, L"Размер файла ППКУ больше 512 КБ (лимит слота UPDATE).", L"Updater", MB_ICONWARNING);
             return;
         }
+        if (g_selectedTargetDev.d_type == DEVICE_ESP32_TYPE && fsz > ESP_FW_MAX_BYTES) {
+            MessageBoxW(g_hwnd, L"Размер файла ESP32 больше 960 КБ (лимит слота OTA).", L"Updater", MB_ICONWARNING);
+            return;
+        }
         if (g_selectedTargetDev.d_type == DEVICE_PANEL_TYPE && fsz > PANEL_FW_MAX_BYTES) {
             MessageBoxW(g_hwnd, L"Размер файла панели больше 256 КБ.", L"Updater", MB_ICONWARNING);
             return;
@@ -1878,6 +2009,9 @@ static void StopUpdate(void) {
     if (g_activeUpdateDevValid && InterlockedCompareExchange(&g_connected, 0, 0)) {
         if (IsPanelDev(&g_activeUpdateDev)) {
             (void)SendPanelRsCmd(g_activeUpdateDev.l_adr, CMD_UPDATE_TRANSMIT, NULL, 0);
+        } else if (IsEspDev(&g_activeUpdateDev)) {
+            uint8_t endd[8] = { CMD_UPDATE_TRANSMIT, 0, 0, 0, 0, 0, 0, 0 };
+            SendBsuEspCmd(endd, 8);
         } else {
             uint32_t can_id_req = BuildCanId(g_activeUpdateDev.d_type, g_activeUpdateDev.h_adr,
                                              g_activeUpdateDev.l_adr, g_activeUpdateDev.zone, 0);
@@ -2153,8 +2287,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         int ok = IsWifiMode() ? ConnectTcp() : ConnectSerial();
                         if (ok) {
                             SetConnectedUi(1);
+                            EnsureEsp32Device();
                             Logf(IsWifiMode() ? L"Подключено по WiFi. Список устройств очищен.\r\n"
                                               : L"Подключено по USB. Список устройств очищен.\r\n");
+                            Logf(L"ESP32 добавлен в список устройств (команды 159/156/158 через ESP_CMD).\r\n");
                         } else {
                             MessageBoxW(hwnd,
                                         IsWifiMode() ? L"Ошибка подключения по WiFi (TCP)."
@@ -2178,6 +2314,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_APP_PACKET: {
             PostedPacket *pp = (PostedPacket *)lp;
             if (!pp) break;
+            if (pp->kind == 2) {
+                if (pp->data[0] == CMD_GET_VERSION) {
+                    int idx = -1;
+                    DeviceInfo d = {0};
+                    d.d_type = DEVICE_ESP32_TYPE;
+                    d.last_seen_ms = GetTickCount();
+                    idx = FindOrAddDevice(d);
+                    if (idx >= 0) {
+                        g_devices[idx].d_type = DEVICE_ESP32_TYPE;
+                        g_devices[idx].last_seen_ms = d.last_seen_ms;
+                        HandleVersionPacket(&g_devices[idx], pp->data);
+                        if (idx >= ListView_GetItemCount(g_hDevices)) AddDeviceToList(idx);
+                        else RefreshDeviceListRow(idx);
+                    }
+                }
+                free(pp);
+                break;
+            }
             if (pp->kind == 1) {
                 if ((pp->rs_flags & RS_BUS_FLAG_DIR) != 0 &&
                     pp->rs_cmd == RS_PANEL_RSP_ACTIVITY &&

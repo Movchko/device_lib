@@ -21,6 +21,10 @@ enum EspCmd {
 	ESP_CMD_WIFI_DISABLE = 2,
 	ESP_CMD_SET_CONFIG   = 3,
 	ESP_CMD_PING         = 4,
+	/* Совпадают с ServiceCmd ППКУ/МКУ/панели. */
+	ESP_CMD_SET_UPDATE_WORD = 156,
+	ESP_CMD_UPDATE_TRANSMIT = 158,
+	ESP_CMD_GET_VERSION     = 159,
 };
 
 typedef struct __attribute__((packed)) EspActivityPayload {
