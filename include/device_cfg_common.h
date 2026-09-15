@@ -23,6 +23,12 @@
 #define DEVICE_MCU_K3 22u
 #define DEVICE_MCU_KR 23u
 
+/* Панель управления (RS485): приложение и бутлоадер — разные режимы одного класса. */
+#define DEVICE_PANEL_TYPE            30u
+#define DEVICE_PANEL_BOOTLOADER_TYPE 31u
+/* Блок питания на RS-шине (резерв). */
+#define DEVICE_PSU_TYPE              32u
+
 /* Общая “сырая” область под данные конкретных устройств.
  * В C++ разные типы конфигов читаются через reinterpret_cast из reserv.
  */

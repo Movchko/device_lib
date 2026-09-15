@@ -164,14 +164,18 @@ typedef struct {
 Пакет нужен ПО для индикации «устройство на шине».
 
 ```
-dev_type        u8      RsBusDevType: 0x01=panel_app, 0x02=panel_bootloader, 0x10=psu(резерв)
+dev_type        u8      device_cfg: 30=DEVICE_PANEL_TYPE (app), 31=DEVICE_PANEL_BOOTLOADER_TYPE, 32=DEVICE_PSU_TYPE (резерв)
 fw_ver          u16     LE
 hw_id           u16     LE
 status          u8      как в CAPS (для boot обычно 0)
 uptime_sec      u32     LE, секунды с старта текущего режима
+uid0            u32     LE, chip UID (опционально, если payload ≥ 22)
+uid1            u32     LE
+uid2            u32     LE
 ```
 
-Размер payload: 10 байт (`RS_PANEL_ACTIVITY_PAYLOAD_SIZE`).
+Базовый размер payload: 10 байт (`RS_PANEL_ACTIVITY_PAYLOAD_SIZE`).
+С UID: 22 байта (`RS_PANEL_ACTIVITY_PAYLOAD_SIZE_UID`). Декодер принимает оба варианта.
 
 Пути доставки в ПО:
 - **Прямой RS485**: внешнее устройство на той же шине видит кадр как есть.
@@ -219,13 +223,14 @@ payload зависит от sub:
 
 | sub | Payload | Действие |
 |-----|---------|----------|
-| `0x01` | `orientation u8` | Поворот UI (TouchGFX orientation) |
-| `0x02` | `btn_enable u8` | Битовая маска по RsBtnType (бит N = тип N+1) |
-| `0x03` | `led_enable u16` | Битовая маска по RsLedType |
-| `0x04` | `journal_lines u8` | Пересчёт вместимости журнала |
-| `0x0F` | — | Сброс к заводскому CAPS |
+| `0x01` | `orientation u8` | Поворот UI (TouchGFX orientation); пишется во Flash |
+| `0x02` | `btn_enable u8` | Битовая маска по RsBtnType (бит N = тип N+1); Flash |
+| `0x03` | `led_enable u16` | Битовая маска по RsLedType; Flash |
+| `0x04` | `journal_lines u8` | Пересчёт вместимости журнала; Flash |
+| `0x05` | `rs_addr u8` | Смена RS-адреса панели (1..0xFE); Flash. Ответ CAPS на **старом** addr, далее панель слушает новый |
+| `0x0F` | — | Сброс к заводскому конфигу (addr=1 и профиль) + Flash |
 
-Панель отвечает `RSP_CAPS` (обновлённый) или `RSP_ACK`. ППКУ 2 сохраняет оверрайд в `RsPanelCfg.profile_override`.
+Панель отвечает `RSP_CAPS` (обновлённый) или `RSP_ACK`. Локальный конфиг панели — `DevicePanelConfig` в Flash (`device_config.h`), сектор `0x0807E000`. ППКУ 2 может дополнительно хранить оверрайд в `PanelConfig`.
 
 Отключённая кнопка не генерирует событий. Отключённый LED игнорирует `CMD_LED` для своего типа.
 
@@ -304,17 +309,38 @@ payload зависит от sub:
 | `CAPS_REQ` | `0xF0` | unicast | Запрос возможностей |
 | `PROFILE_SET` | `0xF1` | unicast | Изменение профиля |
 | `PANEL_RESET` | `0xF2` | bcast/ucast | Мягкий сброс UI панели |
-| `ENTER_BOOTLOADER` | `0xF3` | unicast | Вход в бутлоадер: панель пишет в SRAM флаг обновления и свой `rs_addr`, soft-reset. Далее обмен на **том же `addr`** командами 156/158/159/128; ACTIVITY с `dev_type=panel_bootloader` |
+| `ENTER_BOOTLOADER` | `0xF3` | unicast | Вход в бутлоадер: панель пишет в SRAM флаг обновления и свой `rs_addr`, soft-reset. Далее обмен на **том же `addr`** командами 156/158/159/128; ACTIVITY с `dev_type=DEVICE_PANEL_BOOTLOADER_TYPE` (31) |
+| `DISCOVER` | `0xF4` | broadcast | Инвентаризация панелей по chip UID; ответ `RSP_DISCOVER` со случайной задержкой 20..520 мс |
+| `ASSIGN_BY_UID` | `0xF5` | broadcast | Назначить `new_addr` панели с совпадающим UID; Flash + `addr_assigned=1` |
 
 ### 7.2. Panel → Master (DIR=1)
 
 | CMD | Код | Описание |
 |-----|-----|----------|
 | `RSP_POLL` | `0x81` | Ответ на POLL |
+| `RSP_ACTIVITY` | `0x82` | Presence 1 Гц (+ UID) |
+| `RSP_DISCOVER` | `0x84` | Ответ на DISCOVER: UID + current_addr + flags |
 | `RSP_CAPS` | `0xF0` | Возможности панели |
 | `RSP_ACK` | `0xFE` | Подтверждение (seq в payload) |
 
----
+### 7.3. Автораздача адресов (первый старт / коллизии)
+
+1. ППКУ через ~2 с после старта шлёт broadcast `DISCOVER`.
+2. Каждая панель отвечает `RSP_DISCOVER` (`uid0..2`, `current_addr`, `flags.bit0=addr_assigned`) с задержкой от UID.
+3. ППКУ назначает свободные адреса `1..8`, шлёт `ASSIGN_BY_UID` для нуждающихся, обновляет `panel_count`/слоты.
+4. Коллизия: на одном `addr` в `ACTIVITY` приходят разные UID → снова DISCOVER/ASSIGN.
+
+`RSP_DISCOVER` payload (14 байт):
+```
+uid0 u32, uid1 u32, uid2 u32, current_addr u8, flags u8
+```
+
+`ASSIGN_BY_UID` payload (13 байт):
+```
+uid0 u32, uid1 u32, uid2 u32, new_addr u8
+```
+
+Заводская панель: `DevicePanelConfig.addr_assigned=0`, `rs_addr=1` (magic Flash `PNL2`).
 
 ## 8. POLL — периодический обмен
 
@@ -759,3 +785,6 @@ ENTER:
 | 0.4 | 2026-08-25 | RSP_ACTIVITY 1 Гц (app/bootloader), мост RS↔ESP_UART для presence и FW update |
 | 0.5 | 2026-08-25 | ENTER_BOOTLOADER `0xF3`: вход приложения в бут (SRAM-флаг + soft-reset), обновление на `0xFD` |
 | 0.6 | 2026-08-25 | Бут на том же `addr`, что панель; ACTIVITY.dev_type = RsBusDevType (panel_app / panel_bootloader / psu) |
+| 0.7 | 2026-09-15 | ACTIVITY.dev_type из device_cfg: PANEL=30, PANEL_BOOT=31, PSU=32 |
+| 0.8 | 2026-09-15 | DevicePanelConfig во Flash; PROFILE_SET 0x05 = смена RS-адреса |
+| 0.9 | 2026-09-15 | DISCOVER/ASSIGN_BY_UID по chip UID; ACTIVITY+UID; автораздача и коллизии на ППКУ |

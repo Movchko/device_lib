@@ -235,12 +235,43 @@ typedef struct DeviceLimitSwitchConfig {
 	uint8_t reserved[VDEVICE_CFG_SIZE - 9];
 } DeviceLimitSwitchConfig;
 
+/* Конфигурация панели (DEVICE_PANEL_TYPE), хранится во Flash панели.
+ * Размер = VDEVICE_CFG_SIZE, как у остальных Device*Config. */
+#define PANEL_CFG_HEADER_MAGIC   0x504E4C32u /* 'P','N','L','2' — v2 с UID/assign */
+#define PANEL_CFG_FORMAT_VERSION 2u
+
+typedef struct DevicePanelConfig {
+	/* RS-адрес на шине: 0x01..0xFE. По умолчанию 0x01. */
+	uint8_t rs_addr;
+	/* Ориентация UI: 0=гориз., 1=верт. */
+	uint8_t orientation;
+	/* Число строк журнала на экране (1..N). */
+	uint8_t journal_lines;
+	/* Битовая маска кнопок по RsBtnType (бит N = тип N+1); 0xFF = все. */
+	uint8_t btn_enable;
+	/* Битовая маска LED по RsLedType; 0xFFFF = все. */
+	uint16_t led_enable;
+	/* Роль панели: RsPanelRole (0=normal, 1=primary). */
+	uint8_t role;
+	/* 0 = заводской (virgin), 1 = адрес выдан мастером (ASSIGN_BY_UID). */
+	uint8_t addr_assigned;
+	/* Chip UID (копия HAL_GetUIDw0/1/2), для discovery. */
+	uint32_t uid0;
+	uint32_t uid1;
+	uint32_t uid2;
+	/* резерв до VDEVICE_CFG_SIZE (64 байта): 1+1+1+1+2+1+1+12 = 20 */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 20];
+} DevicePanelConfig;
+
 #ifdef __cplusplus
 static_assert(sizeof(DeviceDPTConfig) == VDEVICE_CFG_SIZE, "DeviceDPTConfig size mismatch");
 static_assert(sizeof(DeviceButtonConfig) == VDEVICE_CFG_SIZE, "DeviceButtonConfig size mismatch");
 static_assert(sizeof(DeviceIgniterConfig) == VDEVICE_CFG_SIZE, "DeviceIgniterConfig size mismatch");
 static_assert(sizeof(DeviceRelayConfig) == VDEVICE_CFG_SIZE, "DeviceRelayConfig size mismatch");
 static_assert(sizeof(DeviceLimitSwitchConfig) == VDEVICE_CFG_SIZE, "DeviceLimitSwitchConfig size mismatch");
+static_assert(sizeof(DevicePanelConfig) == VDEVICE_CFG_SIZE, "DevicePanelConfig size mismatch");
+#else
+_Static_assert(sizeof(DevicePanelConfig) == VDEVICE_CFG_SIZE, "DevicePanelConfig size mismatch");
 #endif
 
 

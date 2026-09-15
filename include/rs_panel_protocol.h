@@ -2,6 +2,7 @@
 #define RS_PANEL_PROTOCOL_H
 
 #include <stdint.h>
+#include "device_cfg_common.h"
 #include "rs_bus_frame.h"
 
 #ifdef __cplusplus
@@ -33,8 +34,11 @@ typedef enum {
     /* Вход в бутлоадер: приложение пишет TAMP BKP-флаг (+ rs_addr) и soft-reset.
      * Бут отвечает на том же RS-адресе, что и приложение панели. */
     RS_PANEL_CMD_ENTER_BOOTLOADER = 0xF3u,
+    /* Discovery/assign адресов по chip UID (broadcast). */
+    RS_PANEL_CMD_DISCOVER = 0xF4u,
+    RS_PANEL_CMD_ASSIGN_BY_UID = 0xF5u,
     /* Команды обновления прошивки панели (совпадают с ServiceCmd МКУ).
-     * Unicast на адрес панели; тип в ACTIVITY = PANEL_BOOTLOADER. */
+     * Unicast на адрес панели; тип в ACTIVITY = DEVICE_PANEL_BOOTLOADER_TYPE. */
     RS_PANEL_CMD_BOOT_RESET_MCU      = 128u,
     RS_PANEL_CMD_BOOT_SET_UPD_WORD = 156u,
     RS_PANEL_CMD_BOOT_UPD_TRANSMIT = 158u,
@@ -42,24 +46,27 @@ typedef enum {
     RS_PANEL_RSP_POLL        = 0x81u,
     /* Незапрошенный пакет активности (1 Гц): тип устройства в payload.dev_type. */
     RS_PANEL_RSP_ACTIVITY    = 0x82u,
+    /* Ответ на DISCOVER: UID + текущий addr + flags (со случайной задержкой). */
+    RS_PANEL_RSP_DISCOVER    = 0x84u,
     RS_PANEL_RSP_CAPS        = 0xF0u,
     RS_PANEL_RSP_ACK         = 0xFEu
 } RsPanelCommand;
 
-/* Тип устройства на общей RS-шине (поле ACTIVITY.dev_type).
- * Адрес (addr) уникален на шине; тип отличает роль и класс устройства. */
-typedef enum {
-    RS_BUS_DEV_TYPE_PANEL_APP        = 0x01u, /* приложение панели */
-    RS_BUS_DEV_TYPE_PANEL_BOOTLOADER = 0x02u, /* бутлоадер панели */
-    RS_BUS_DEV_TYPE_PSU              = 0x10u  /* блок питания (резерв) */
-} RsBusDevType;
+/* ACTIVITY.dev_type — тип из device_cfg_common.h (общая нумерация устройств).
+ * addr уникален на шине; app и boot отличаются типом 30/31. */
+#define RS_BUS_DEV_TYPE_PANEL_APP        DEVICE_PANEL_TYPE
+#define RS_BUS_DEV_TYPE_PANEL_BOOTLOADER DEVICE_PANEL_BOOTLOADER_TYPE
+#define RS_BUS_DEV_TYPE_PSU              DEVICE_PSU_TYPE
 
 #define RS_PANEL_DEV_KIND_APP        RS_BUS_DEV_TYPE_PANEL_APP
 #define RS_PANEL_DEV_KIND_BOOTLOADER RS_BUS_DEV_TYPE_PANEL_BOOTLOADER
-typedef RsBusDevType RsPanelDevKind;
 
-#define RS_PANEL_ACTIVITY_PAYLOAD_SIZE 10u
-
+/* Базовый ACTIVITY (совместимость); +12 байт UID = полный. */
+#define RS_PANEL_ACTIVITY_PAYLOAD_SIZE     10u
+#define RS_PANEL_ACTIVITY_PAYLOAD_SIZE_UID 22u
+#define RS_PANEL_DISCOVER_RSP_SIZE         14u /* uid0..2 + addr + flags */
+#define RS_PANEL_ASSIGN_BY_UID_SIZE        13u /* uid0..2 + new_addr */
+#define RS_PANEL_DISCOVER_FLAG_ASSIGNED    0x01u
 
 typedef enum {
     RS_PANEL_BTN_ESC = 0x01u,
@@ -168,16 +175,38 @@ typedef enum {
     RS_PANEL_PROFILE_SET_BTN_MASK = 0x02u,
     RS_PANEL_PROFILE_SET_LED_MASK = 0x03u,
     RS_PANEL_PROFILE_SET_JOURNAL_LINES = 0x04u,
+    /* Смена RS-адреса панели на шине (1..0xFE); сохраняется во Flash. */
+    RS_PANEL_PROFILE_SET_RS_ADDR = 0x05u,
     RS_PANEL_PROFILE_SET_FACTORY_RESET = 0x0Fu
 } RsProfileSetSub;
 
 typedef struct {
-    uint8_t dev_type;    /* RsBusDevType */
+    uint8_t dev_type;    /* DEVICE_PANEL_TYPE / DEVICE_PANEL_BOOTLOADER_TYPE / DEVICE_PSU_TYPE */
     uint16_t fw_ver;
     uint16_t hw_id;
     uint8_t status;      /* bit0=btn_ok, bit1=display_ok (для boot обычно 0) */
     uint32_t uptime_sec;
+    /* Опционально (payload >= 22): chip UID для коллизий/инвентаризации. */
+    uint32_t uid0;
+    uint32_t uid1;
+    uint32_t uid2;
+    uint8_t uid_valid;
 } RsPanelActivity;
+
+typedef struct {
+    uint32_t uid0;
+    uint32_t uid1;
+    uint32_t uid2;
+    uint8_t current_addr;
+    uint8_t flags; /* bit0 = addr_assigned */
+} RsPanelDiscoverRsp;
+
+typedef struct {
+    uint32_t uid0;
+    uint32_t uid1;
+    uint32_t uid2;
+    uint8_t new_addr;
+} RsPanelAssignByUidCmd;
 
 typedef struct {
     uint8_t flags;
@@ -268,11 +297,16 @@ typedef struct {
         uint8_t btn_enable;
         uint16_t led_enable;
         uint8_t journal_lines;
+        uint8_t rs_addr; /* PROFILE_SET_RS_ADDR: 0x01..0xFE */
     } value;
 } RsPanelProfileSetCmd;
 
 uint16_t RsPanel_EncodeActivity(uint8_t *dst, uint16_t dst_size, const RsPanelActivity *act);
 uint8_t RsPanel_DecodeActivity(const uint8_t *src, uint16_t src_len, RsPanelActivity *out_act);
+uint16_t RsPanel_EncodeDiscoverRsp(uint8_t *dst, uint16_t dst_size, const RsPanelDiscoverRsp *rsp);
+uint8_t RsPanel_DecodeDiscoverRsp(const uint8_t *src, uint16_t src_len, RsPanelDiscoverRsp *out_rsp);
+uint16_t RsPanel_EncodeAssignByUid(uint8_t *dst, uint16_t dst_size, const RsPanelAssignByUidCmd *cmd);
+uint8_t RsPanel_DecodeAssignByUid(const uint8_t *src, uint16_t src_len, RsPanelAssignByUidCmd *out_cmd);
 
 uint16_t RsPanel_EncodePollReq(uint8_t *dst, uint16_t dst_size, const RsPanelPollReq *req);
 uint8_t RsPanel_DecodePollReq(const uint8_t *src, uint16_t src_len, RsPanelPollReq *out_req);

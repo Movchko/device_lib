@@ -50,7 +50,9 @@
 
 #define DEVICE_PPKY_TYPE      10u
 #define DEVICE_ESP32_TYPE     11u
-#define DEVICE_PANEL_TYPE     30u
+/* Совпадает с device_cfg_common.h */
+#define DEVICE_PANEL_TYPE            30u
+#define DEVICE_PANEL_BOOTLOADER_TYPE 31u
 #define PPKY_FW_MAX_BYTES     (512u * 1024u)
 #define ESP_FW_MAX_BYTES      (960u * 1024u)
 #define PANEL_FW_MAX_BYTES    (256u * 1024u)
@@ -103,8 +105,8 @@
 #define RS_BUS_PREAMBLE_0      0xA5u
 #define RS_BUS_PREAMBLE_1      0x5Au
 #define RS_BUS_FLAG_DIR        0x01u
-#define RS_BUS_DEV_TYPE_PANEL_APP        0x01u
-#define RS_BUS_DEV_TYPE_PANEL_BOOTLOADER 0x02u
+#define RS_BUS_DEV_TYPE_PANEL_APP        DEVICE_PANEL_TYPE
+#define RS_BUS_DEV_TYPE_PANEL_BOOTLOADER DEVICE_PANEL_BOOTLOADER_TYPE
 #define ENTER_BOOT_WAIT_MS     15000u
 #define ACK_RETRY_FIRST_WORD 4
 #define ACK_RETRY_NORMAL 8
@@ -126,7 +128,7 @@ typedef struct {
     uint32_t version;
     char version_str[80];
     uint8_t version_pkt_next;
-    uint8_t rs_dev_type; /* 0x01 app / 0x02 bootloader, только для DEVICE_PANEL_TYPE */
+    uint8_t rs_dev_type; /* ACTIVITY.dev_type: 30=app / 31=bootloader, только для DEVICE_PANEL_TYPE */
     uint8_t version_req_sent;
     uint8_t version_retries;
     uint32_t version_req_ms;
@@ -2025,13 +2027,22 @@ static void StopUpdate(void) {
 typedef struct {
     const wchar_t *tag;
     const wchar_t *proj_dir;
-} MkuCollectEntry;
+    const wchar_t *ver_relpath;
+    const char *ver_define;
+    int builder_bin; /* 1: *_builder.bin, 0: {proj_dir}.bin */
+} FwCollectEntry;
 
-static const MkuCollectEntry g_mku_collect[] = {
-    { L"K1", L"MCU_k1_v097" },
-    { L"K2", L"MCU_k2_v097" },
-    { L"K3", L"MCU_k3_v097" },
-    { L"KR", L"MCU_kr_v095" },
+static const FwCollectEntry g_fw_collect[] = {
+    { L"MKU_K1", L"MCU_k1_v097", L"Core\\Src\\upd.cpp", "APP_VERSION_U32", 1 },
+    { L"MKU_K2", L"MCU_k2_v097", L"Core\\Src\\upd.cpp", "APP_VERSION_U32", 1 },
+    { L"MKU_K3", L"MCU_k3_v097", L"Core\\Src\\upd.cpp", "APP_VERSION_U32", 1 },
+    { L"MKU_KR", L"MCU_kr_v095", L"Core\\Src\\upd.cpp", "APP_VERSION_U32", 1 },
+    { L"PPKU1", L"stm_PPKY", L"Core\\Src\\main.c", "APP_VERSION_U32", 1 },
+    { L"PPKU2", L"stm_PPKY_V2", L"Core\\Src\\main.c", "APP_VERSION_U32", 1 },
+    { L"Panel", L"stm_ControlBoard_v1", L"Core\\Inc\\panel_app.h", "PANEL_APP_VERSION_U32", 1 },
+    { L"MCU_bootloader", L"MCU_bootloader", L"Core\\Inc\\boot_app.h", "BOOTLOADER_VERSION_U32", 0 },
+    { L"PPKU_bootloader", L"stm_PPKY_Bootloader", L"Core\\Inc\\boot_layout.h", "BOOTLOADER_VERSION_U32", 0 },
+    { L"Panel_bootloader", L"MCU_bootloader_v2", L"Core\\Inc\\boot_app.h", "BOOTLOADER_VERSION_U32", 0 },
 };
 
 static int EnsureDirectoryExists(const wchar_t *path) {
@@ -2059,45 +2070,49 @@ static void ClearDirectoryFiles(const wchar_t *dir) {
     FindClose(h);
 }
 
-static int ReadTextFileA(const wchar_t *path, char *buf, size_t buf_sz) {
+static int ParseDefineU32FromFile(const wchar_t *path, const char *define_name,
+                                  long *base, int *has_uniq_debug) {
     FILE *fp = _wfopen(path, L"rb");
     if (!fp) return 0;
-    size_t n = fread(buf, 1, buf_sz - 1, fp);
+    char needle[96];
+    snprintf(needle, sizeof(needle), "#define %s", define_name);
+    size_t needle_len = strlen(needle);
+    char line[1024];
+    int found = 0;
+    while (fgets(line, sizeof(line), fp)) {
+        const char *p = strstr(line, needle);
+        if (!p) continue;
+        p += needle_len;
+        if (*p != ' ' && *p != '\t') continue;
+        while (*p == ' ' || *p == '\t') p++;
+        if (sscanf(p, "%ld", base) != 1) continue;
+        if (has_uniq_debug) *has_uniq_debug = (strstr(p, "UNIQ_DEBUG") != NULL);
+        found = 1;
+        break;
+    }
     fclose(fp);
-    buf[n] = '\0';
-    return (int)(n > 0);
+    return found;
 }
 
 static int ParseUniqDebugFromMainH(const wchar_t *proj_dir, int *uniq_debug) {
     wchar_t main_h[MAX_PATH];
-    char text[16384];
+    long v = 0;
+    int dummy = 0;
     wsprintfW(main_h, L"%s%s\\Core\\Inc\\main.h", FW_WORKSPACE_ROOT, proj_dir);
-    if (!ReadTextFileA(main_h, text, sizeof(text))) return 0;
-    const char *p = strstr(text, "#define UNIQ_DEBUG");
-    if (!p) return 0;
-    p += strlen("#define UNIQ_DEBUG");
-    while (*p == ' ' || *p == '\t') p++;
-    *uniq_debug = atoi(p);
+    if (!ParseDefineU32FromFile(main_h, "UNIQ_DEBUG", &v, &dummy)) return 0;
+    *uniq_debug = (int)v;
     return 1;
 }
 
-static int ParseAppVersionU32(const wchar_t *proj_dir, uint32_t *version) {
-    wchar_t upd_path[MAX_PATH];
-    char text[8192];
-    wsprintfW(upd_path, L"%s%s\\Core\\Src\\upd.cpp", FW_WORKSPACE_ROOT, proj_dir);
-    if (!ReadTextFileA(upd_path, text, sizeof(text))) return 0;
-
-    const char *p = strstr(text, "#define APP_VERSION_U32");
-    if (!p) return 0;
-    p += strlen("#define APP_VERSION_U32");
-    while (*p == ' ' || *p == '\t') p++;
-
+static int ParseCollectVersion(const FwCollectEntry *e, uint32_t *version) {
+    wchar_t path[MAX_PATH];
     long base = 0;
-    if (sscanf(p, "%ld", &base) != 1) return 0;
-
-    if (strstr(p, "UNIQ_DEBUG")) {
+    int has_uniq = 0;
+    wsprintfW(path, L"%s%s\\%s", FW_WORKSPACE_ROOT, e->proj_dir, e->ver_relpath);
+    if (!ParseDefineU32FromFile(path, e->ver_define, &base, &has_uniq)) return 0;
+    if (has_uniq) {
         int uniq_debug = 0;
-        if (!ParseUniqDebugFromMainH(proj_dir, &uniq_debug)) uniq_debug = 0;
+        if (!ParseUniqDebugFromMainH(e->proj_dir, &uniq_debug)) uniq_debug = 0;
         *version = (uint32_t)(base + uniq_debug * 100);
     } else {
         *version = (uint32_t)base;
@@ -2105,7 +2120,7 @@ static int ParseAppVersionU32(const wchar_t *proj_dir, uint32_t *version) {
     return 1;
 }
 
-static int FindBuilderBinInProject(const wchar_t *proj_dir, wchar_t *out_path, size_t out_chars) {
+static int FindCollectBinInProject(const FwCollectEntry *e, wchar_t *out_path, size_t out_chars) {
     static const wchar_t *configs[] = { L"Debug", L"Release" };
     wchar_t best_path[MAX_PATH];
     best_path[0] = L'\0';
@@ -2114,14 +2129,18 @@ static int FindBuilderBinInProject(const wchar_t *proj_dir, wchar_t *out_path, s
 
     for (size_t ci = 0; ci < sizeof(configs) / sizeof(configs[0]); ci++) {
         wchar_t pattern[MAX_PATH];
-        wsprintfW(pattern, L"%s%s\\%s\\*_builder.bin", FW_WORKSPACE_ROOT, proj_dir, configs[ci]);
+        if (e->builder_bin) {
+            wsprintfW(pattern, L"%s%s\\%s\\*_builder.bin", FW_WORKSPACE_ROOT, e->proj_dir, configs[ci]);
+        } else {
+            wsprintfW(pattern, L"%s%s\\%s\\%s.bin", FW_WORKSPACE_ROOT, e->proj_dir, configs[ci], e->proj_dir);
+        }
         WIN32_FIND_DATAW fd;
         HANDLE h = FindFirstFileW(pattern, &fd);
         if (h == INVALID_HANDLE_VALUE) continue;
         do {
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
             wchar_t full[MAX_PATH];
-            wsprintfW(full, L"%s%s\\%s\\%s", FW_WORKSPACE_ROOT, proj_dir, configs[ci], fd.cFileName);
+            wsprintfW(full, L"%s%s\\%s\\%s", FW_WORKSPACE_ROOT, e->proj_dir, configs[ci], fd.cFileName);
             if (!found || CompareFileTime(&fd.ftLastWriteTime, &best_time) > 0) {
                 wcsncpy(best_path, full, MAX_PATH - 1);
                 best_path[MAX_PATH - 1] = L'\0';
@@ -2145,29 +2164,31 @@ static void CollectFirmwares(void) {
     }
 
     ClearDirectoryFiles(FW_COLLECT_DST);
-    Logf(L"Сборка прошивок МКУ в %s\r\n", FW_COLLECT_DST);
+    Logf(L"Сборка всех прошивок в %s\r\n", FW_COLLECT_DST);
 
     int ok_count = 0;
     int fail_count = 0;
 
-    for (size_t i = 0; i < sizeof(g_mku_collect) / sizeof(g_mku_collect[0]); i++) {
-        const MkuCollectEntry *e = &g_mku_collect[i];
+    for (size_t i = 0; i < sizeof(g_fw_collect) / sizeof(g_fw_collect[0]); i++) {
+        const FwCollectEntry *e = &g_fw_collect[i];
         wchar_t src[MAX_PATH];
         uint32_t ver = 0;
 
-        if (!FindBuilderBinInProject(e->proj_dir, src, MAX_PATH)) {
-            Logf(L"[ОШИБКА] %s: не найден *_builder.bin\r\n", e->tag);
+        if (!FindCollectBinInProject(e, src, MAX_PATH)) {
+            Logf(L"[ОШИБКА] %s: не найден %s\r\n", e->tag,
+                 e->builder_bin ? L"*_builder.bin" : L"проектный .bin");
             fail_count++;
             continue;
         }
-        if (!ParseAppVersionU32(e->proj_dir, &ver)) {
-            Logf(L"[ОШИБКА] %s: не удалось прочитать APP_VERSION_U32\r\n", e->tag);
+        if (!ParseCollectVersion(e, &ver)) {
+            Logf(L"[ОШИБКА] %s: не удалось прочитать версию\r\n", e->tag);
             fail_count++;
             continue;
         }
 
         wchar_t dst[MAX_PATH];
-        wsprintfW(dst, L"%s\\MKU_%s_v%u_builder.bin", FW_COLLECT_DST, e->tag, ver);
+        wsprintfW(dst, L"%s\\%s_v%u%s.bin", FW_COLLECT_DST, e->tag, ver,
+                  e->builder_bin ? L"_builder" : L"");
         if (!CopyFileW(src, dst, FALSE)) {
             Logf(L"[ОШИБКА] %s: копирование не удалось\r\n", e->tag);
             fail_count++;
@@ -2184,7 +2205,7 @@ static void CollectFirmwares(void) {
     } else if (ok_count == 0) {
         MessageBoxW(g_hwnd, L"Не скопировано ни одного файла.", L"Собрать", MB_ICONWARNING);
     } else {
-        MessageBoxW(g_hwnd, L"Все прошивки МКУ собраны.", L"Собрать", MB_ICONINFORMATION);
+        MessageBoxW(g_hwnd, L"Все прошивки собраны.", L"Собрать", MB_ICONINFORMATION);
     }
 }
 
@@ -2222,7 +2243,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_hConnect = CreateWindowW(L"BUTTON", L"Подключить", WS_CHILD | WS_VISIBLE, 435, 10, 100, 24, hwnd, (HMENU)IDC_BTN_CONNECT, NULL, NULL);
             CreateWindowW(L"BUTTON", L"Цель обновления...", WS_CHILD | WS_VISIBLE, 545, 10, 145, 24, hwnd, (HMENU)IDC_BTN_SELECT_TARGET, NULL, NULL);
             CreateWindowW(L"BUTTON", L"Прочитать версии", WS_CHILD | WS_VISIBLE, 695, 10, 130, 24, hwnd, (HMENU)IDC_BTN_FORCE_VERSION, NULL, NULL);
-            CreateWindowW(L"BUTTON", L"Собрать", WS_CHILD | WS_VISIBLE, 830, 10, 80, 24, hwnd, (HMENU)IDC_BTN_COLLECT, NULL, NULL);
+            CreateWindowW(L"BUTTON", L"Собрать все", WS_CHILD | WS_VISIBLE, 830, 10, 110, 24, hwnd, (HMENU)IDC_BTN_COLLECT, NULL, NULL);
 
             g_hDevices = CreateWindowW(WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | WS_BORDER,
                                        10, 44, w - 20, 180, hwnd, (HMENU)IDC_LIST_DEVICES, NULL, NULL);
