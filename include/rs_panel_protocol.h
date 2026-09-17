@@ -37,6 +37,8 @@ typedef enum {
     /* Discovery/assign адресов по chip UID (broadcast). */
     RS_PANEL_CMD_DISCOVER = 0xF4u,
     RS_PANEL_CMD_ASSIGN_BY_UID = 0xF5u,
+    /* Host→ППКУ: включить WiFi (панели игнорируют). Broadcast addr=0, DIR=0. */
+    RS_PANEL_CMD_PPKY_WIFI_ENABLE = 0xF6u,
     /* Команды обновления прошивки панели (совпадают с ServiceCmd МКУ).
      * Unicast на адрес панели; тип в ACTIVITY = DEVICE_PANEL_BOOTLOADER_TYPE. */
     RS_PANEL_CMD_BOOT_RESET_MCU      = 128u,

@@ -26,7 +26,9 @@ BSU_PKT_TYPE_ESP_UART = 5
 
 RS_BUS_PREAMBLE = (0xA5, 0x5A)
 RS_BUS_FLAG_DIR = 0x01
+RS_BUS_BROADCAST_ADDR = 0x00
 RS_PANEL_RSP_ACTIVITY = 0x82
+RS_PANEL_CMD_PPKY_WIFI_ENABLE = 0xF6
 RS_BUS_DEV_TYPE_PANEL_APP = 30  # DEVICE_PANEL_TYPE
 RS_BUS_DEV_TYPE_PANEL_BOOTLOADER = 31  # DEVICE_PANEL_BOOTLOADER_TYPE
 DEVICE_PANEL_TYPE = 30
@@ -199,6 +201,53 @@ def decode_rs_bus_frame(src: bytes) -> dict | None:
         "cmd": src[6],
         "payload": payload,
     }
+
+
+def encode_rs_bus_frame(
+    addr: int, seq: int, flags: int, cmd: int, payload: bytes = b""
+) -> bytes | None:
+    """Сборка raw RS-кадра (как RsFrameEncode в fw_updater_gui.c)."""
+    if payload is None:
+        payload = b""
+    if len(payload) > 251:
+        return None
+    len_field = 4 + len(payload)
+    total = 2 + 1 + len_field + 2
+    out = bytearray(total)
+    out[0] = RS_BUS_PREAMBLE[0]
+    out[1] = RS_BUS_PREAMBLE[1]
+    out[2] = len_field & 0xFF
+    out[3] = addr & 0xFF
+    out[4] = seq & 0xFF
+    out[5] = flags & 0xFF
+    out[6] = cmd & 0xFF
+    if payload:
+        out[7:7 + len(payload)] = payload
+    crc = sum(out[3:3 + len_field]) & 0xFFFF
+    out[7 + len(payload)] = crc & 0xFF
+    out[8 + len(payload)] = (crc >> 8) & 0xFF
+    return bytes(out)
+
+
+_esp_uart_seq = 0
+
+
+def build_bsu_esp_uart_packet(rs_frame: bytes, seq: int | None = None) -> bytes:
+    """BSU type 5: body = raw RS-кадр."""
+    global _esp_uart_seq
+    if not rs_frame or len(rs_frame) > BSU_LOG_BODY_MAX:
+        raise ValueError("rs_frame empty or too long")
+    if seq is None:
+        seq = _esp_uart_seq
+        _esp_uart_seq = (_esp_uart_seq + 1) & 0xFFFF
+    pkt_size = BSU_HEADER_SIZE + len(rs_frame) + BSU_CHECKSUM_SIZE
+    pkt = bytearray()
+    pkt.extend(BSU_PREAMBLE)
+    pkt.extend(struct.pack("<HHH", pkt_size, BSU_PKT_TYPE_ESP_UART, seq & 0xFFFF))
+    pkt.extend(rs_frame)
+    crc = bsu_checksum(pkt)
+    pkt.extend(struct.pack("<H", crc))
+    return bytes(pkt)
 
 
 class BsuLogFrameParser:

@@ -119,11 +119,15 @@ from ppky_log_stream import (
     can_frame_from_bsu_body,
     build_log_request,
     decode_rs_bus_frame,
+    encode_rs_bus_frame,
+    build_bsu_esp_uart_packet,
     LOG_PKT_TYPE_RSP,
     LOG_PKT_TYPE_DATA,
     BSU_PKT_TYPE_ESP_UART,
     RS_BUS_FLAG_DIR,
+    RS_BUS_BROADCAST_ADDR,
     RS_PANEL_RSP_ACTIVITY,
+    RS_PANEL_CMD_PPKY_WIFI_ENABLE,
     RS_BUS_DEV_TYPE_PANEL_APP,
     RS_BUS_DEV_TYPE_PANEL_BOOTLOADER,
     DEVICE_PANEL_TYPE,
@@ -366,6 +370,7 @@ class BusMonitorGUI:
         # Софт/хард ресет устройств на шине (команда 12, параметр 0/1)
         Button(conn_frame, text="Soft reset", command=self._send_ppky_soft_reset).pack(side=LEFT, padx=(8, 0))
         Button(conn_frame, text="Hard reset", command=self._send_ppky_hard_reset).pack(side=LEFT, padx=(4, 0))
+        Button(conn_frame, text="Вкл WiFi", command=self._send_ppky_enable_wifi).pack(side=LEFT, padx=(8, 0))
 
         # Тест: «ПОЖАР» как от МКУ_ТС (h_adr=1 фиксировано; зона — индекс зоны ППКУ, см. Fire_OnStatusFire)
         Label(conn_frame, text="Зона ППКУ:").pack(side=LEFT, padx=(12, 4))
@@ -2054,6 +2059,23 @@ class BusMonitorGUI:
             return
         data = bytes([12, 1]) + b"\x00" * 6
         self._send_ppky_cmd_broadcast(data, "PPKY HardReset (cmd=12, mode=1)")
+
+    def _send_ppky_enable_wifi(self):
+        """Включить WiFi на ППКУ: CAN cmd=16 и RS cmd=0xF6 (для свистка на CAN или RS)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        data = bytes([16]) + b"\x00" * 7
+        self._send_ppky_cmd_broadcast(data, "PPKY EnableWiFi (cmd=16)")
+        rs = encode_rs_bus_frame(
+            RS_BUS_BROADCAST_ADDR, 0, 0, RS_PANEL_CMD_PPKY_WIFI_ENABLE, b""
+        )
+        if rs:
+            pkt = build_bsu_esp_uart_packet(rs)
+            if self._write_packet(pkt, "PPKY EnableWiFi RS 0xF6"):
+                self.msg_queue.put(
+                    {"log": f">> PPKY EnableWiFi RS (cmd=0xF6)  frame=[{rs.hex()}]"}
+                )
 
     def _send_mcu_tc_fire(self):
         """Имитация «ПОЖАР» от МКУ_ТС: h_adr в CAN всегда 1; зона — индекс зоны как в конфиге ППКУ (0…).
