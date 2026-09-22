@@ -657,7 +657,9 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 						if(pos < len)
 							Data[i] = (uint8_t)ver[pos++];
 					}
-					SendMessage(Dev, Command, Data, SEND_NOW, bus);
+					/* Через очередь BackendProcess (не SEND_NOW): иначе 5–9 кадров
+					 * подряд затирают TX/USB-мост и ПК не собирает строку версии. */
+					SendMessage(Dev, Command, Data, 0, bus);
 
 					if(pos >= len) {
 						if(len == 0 || (len % 6u) != 0u)

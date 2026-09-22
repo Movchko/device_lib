@@ -39,6 +39,7 @@
 #define IDC_COMBO_MODE        116
 #define IDC_EDIT_WIFI_HOST    117
 #define IDC_EDIT_WIFI_PORT    118
+#define IDC_BTN_PPKY_CAN_BRIDGE 119
 
 #define FW_WORKSPACE_ROOT     L"D:\\work\\stm_workspace\\"
 #define FW_COLLECT_DST        L"D:\\work\\stm_workspace\\firmware_MKU"
@@ -69,6 +70,16 @@
 /* Когда почти вся пачка пришла — подождать отстающий ACK дольше. */
 #define ACK_BATCH_IDLE_GAP_TAIL_USB  300u
 #define ACK_BATCH_IDLE_GAP_TAIL_WIFI 1200u
+/* ППКУ: каждое слово — SPI page program; idle 100 мс даёт ложные «6 из 8» на USB.
+ * Раньше per-word ждал до 50–200 мс; batch-режим должен ждать не меньше. */
+#define ACK_BATCH_WORD_BUDGET_PPKY_USB     150u
+#define ACK_BATCH_WORD_BUDGET_PPKY_WIFI    200u
+#define ACK_BATCH_IDLE_GAP_PPKY_USB        500u
+#define ACK_BATCH_IDLE_GAP_PPKY_WIFI       800u
+#define ACK_BATCH_IDLE_GAP_PPKY_TAIL_USB   1000u
+#define ACK_BATCH_IDLE_GAP_PPKY_TAIL_WIFI  1500u
+#define PPKY_WORD_PACE_MS_USB              5u
+#define PPKY_WORD_PACE_MS_WIFI             10u
 /* Панель: erase/program — короткий idle даёт ложные «Повтор пачки». */
 #define ACK_BATCH_IDLE_GAP_PANEL_WIFI      2500u
 #define ACK_BATCH_IDLE_GAP_PANEL_TAIL_WIFI 5000u
@@ -83,8 +94,13 @@
 #define WM_APP_UPD_DONE     (WM_APP + 3)
 #define WM_APP_REQ_VERSION  (WM_APP + 4)
 #define IDT_VERSION_RETRY   1
-#define VERSION_RETRY_MAX   5
-#define VERSION_RETRY_MS    2000u
+#define IDT_VERSION_SEND    2
+#define VERSION_RETRY_MAX   12
+#define VERSION_RETRY_MS    2500u
+#define VERSION_FRAG_WAIT_MS 1500u
+#define VERSION_SEND_GAP_MS 250u
+#define VERSION_FRAG_MAX    16u
+#define VERSION_FRAG_BYTES  6u
 
 #define BSU_PKT_TYPE_CAN1      0u
 #define BSU_PKT_TYPE_ESP_CMD   3u
@@ -102,9 +118,14 @@
 #define CMD_ENTER_BOOTLOADER   0xF3u
 #define RS_PANEL_RSP_ACTIVITY  0x82u
 #define RS_PANEL_RSP_ACK       0xFEu
+#define RS_PANEL_CMD_PPKY_CAN_MIRROR_SET 0xF7u
+#define RS_PANEL_CMD_CAN_MIRROR          0xF8u
+#define RS_PANEL_CMD_CAN_TO_BUS          0xF9u
 #define RS_BUS_PREAMBLE_0      0xA5u
 #define RS_BUS_PREAMBLE_1      0x5Au
 #define RS_BUS_FLAG_DIR        0x01u
+#define RS_BUS_ADDR_RESERVED   0xFFu
+#define RS_BUS_BROADCAST_ADDR  0x00u
 #define RS_BUS_DEV_TYPE_PANEL_APP        DEVICE_PANEL_TYPE
 #define RS_BUS_DEV_TYPE_PANEL_BOOTLOADER DEVICE_PANEL_BOOTLOADER_TYPE
 #define ENTER_BOOT_WAIT_MS     15000u
@@ -127,7 +148,9 @@ typedef struct {
     uint8_t version_valid;
     uint32_t version;
     char version_str[80];
-    uint8_t version_pkt_next;
+    uint8_t version_frags[VERSION_FRAG_MAX][VERSION_FRAG_BYTES];
+    uint16_t version_frag_mask; /* бит i = получен фрагмент i */
+    uint32_t version_frag_ms;   /* время последнего фрагмента версии (не любого CAN) */
     uint8_t rs_dev_type; /* ACTIVITY.dev_type: 30=app / 31=bootloader, только для DEVICE_PANEL_TYPE */
     uint8_t version_req_sent;
     uint8_t version_retries;
@@ -149,6 +172,7 @@ static HWND g_hPort = NULL, g_hConnect = NULL, g_hDevices = NULL, g_hFile = NULL
 static HWND g_hStart = NULL, g_hStop = NULL, g_hLog = NULL, g_hProgress = NULL;
 static HWND g_hVerify = NULL, g_hBatch = NULL;
 static HWND g_hMode = NULL, g_hWifiHost = NULL, g_hWifiPort = NULL;
+static HWND g_hPpkyCanBridge = NULL;
 
 static HANDLE g_hSerial = INVALID_HANDLE_VALUE;
 static SOCKET g_sock = INVALID_SOCKET;
@@ -159,6 +183,8 @@ static volatile LONG g_readerStop = 0;
 static volatile LONG g_updateStop = 0;
 static volatile LONG g_connected = 0;
 static volatile LONG g_updateRunning = 0;
+/* COM↔RS свисток: TX CAN через 0xF9, RX через зеркало 0xF8 (после 0xF7). */
+static volatile LONG g_ppkyRsCanBridge = 0;
 
 static CRITICAL_SECTION g_ioCs;
 static CRITICAL_SECTION g_ackCs;
@@ -171,6 +197,11 @@ static DeviceInfo g_activeUpdateDev;
 static int g_activeUpdateDevValid = 0;
 static DeviceInfo g_selectedTargetDev;
 static int g_selectedTargetValid = 0;
+
+/* Очередь запросов 159 — не слать всем сразу (коллизии CAN/WiFi). */
+static int g_ver_send_queue[256];
+static int g_ver_send_n = 0;
+static int g_ver_send_i = 0;
 
 typedef struct {
     uint8_t kind; /* 0=CAN, 1=RS ESP_UART, 2=ESP_CMD */
@@ -433,6 +464,10 @@ static int IsEspDev(const DeviceInfo *d) {
     return d && d->d_type == DEVICE_ESP32_TYPE;
 }
 
+static int IsPpkyDev(const DeviceInfo *d) {
+    return d && d->d_type == DEVICE_PPKY_TYPE;
+}
+
 static DWORD g_lastIoError = 0;
 
 static int SerialWrite(const uint8_t *buf, DWORD sz) {
@@ -528,7 +563,29 @@ static void BuildBsuCanPacket(uint8_t *pkt, uint32_t can_id, const uint8_t data[
 static int SendBsuCanPacket(uint32_t can_id, const uint8_t data[8], uint8_t bus_type) {
     uint8_t pkt[BSU_PKT_SIZE_CAN];
     BuildBsuCanPacket(pkt, can_id, data, bus_type);
+    if (InterlockedCompareExchange(&g_ppkyRsCanBridge, 0, 0)) {
+        uint8_t rs[64];
+        uint16_t rs_len = RsFrameEncode(rs, (uint16_t)sizeof(rs),
+                                        RS_BUS_ADDR_RESERVED, g_rsTxSeq++, 0u,
+                                        RS_PANEL_CMD_CAN_TO_BUS, pkt, BSU_PKT_SIZE_CAN);
+        if (rs_len == 0u) return 0;
+        return SendBsuEspUart(rs, rs_len);
+    }
     return SerialWrite(pkt, sizeof(pkt));
+}
+
+static int EnablePpkyRsCanBridge(int enable) {
+    uint8_t pl[1];
+    uint8_t rs[32];
+    uint16_t rs_len;
+    pl[0] = enable ? 1u : 0u;
+    rs_len = RsFrameEncode(rs, (uint16_t)sizeof(rs),
+                           RS_BUS_BROADCAST_ADDR, g_rsTxSeq++, 0u,
+                           RS_PANEL_CMD_PPKY_CAN_MIRROR_SET, pl, 1u);
+    if (rs_len == 0u) return 0;
+    if (!SendBsuEspUart(rs, rs_len)) return 0;
+    InterlockedExchange(&g_ppkyRsCanBridge, enable ? 1 : 0);
+    return 1;
 }
 
 static void ClearDeviceList(void) {
@@ -717,42 +774,74 @@ static DWORD WINAPI ReaderThreadProc(LPVOID arg) {
                             if (RsFrameDecode(body, (uint16_t)body_need, &rs_addr, &rs_seq,
                                               &rs_flags, &rs_cmd, &rs_pl, &rs_plen)) {
                                 int is_dir = (rs_flags & RS_BUS_FLAG_DIR) != 0;
-                                if (is_dir && rs_cmd == CMD_SET_UPDATE_WORD) {
-                                    HandleAckRsFastPath(rs_pl, rs_plen);
-                                }
-                                if (is_dir && rs_cmd == RS_PANEL_RSP_ACTIVITY &&
-                                    rs_plen >= 10u && rs_pl &&
-                                    rs_pl[0] == RS_BUS_DEV_TYPE_PANEL_BOOTLOADER &&
-                                    rs_addr == g_panelWaitAddr) {
-                                    InterlockedExchange(&g_panelBootSeen, 1);
-                                }
-                                if (is_dir && rs_cmd == RS_PANEL_RSP_ACK &&
-                                    rs_addr == g_panelWaitAddr) {
-                                    InterlockedExchange(&g_panelEnterAcked, 1);
-                                }
-                                if (is_dir && rs_cmd == CMD_UPDATE_TRANSMIT &&
-                                    rs_addr == g_panelWaitAddr) {
-                                    InterlockedExchange(&g_panelTransmitSeen, 1);
-                                    if (rs_pl && rs_plen >= 1u && rs_pl[0] == 1u) {
-                                        InterlockedExchange(&g_panelTransmitOk, 1);
-                                    } else {
-                                        InterlockedExchange(&g_panelTransmitOk, 0);
+                                /* 0xF8: зеркало CAN→RS (полный BSU 22B) — как type 0/1. */
+                                if (!is_dir && rs_cmd == RS_PANEL_CMD_CAN_MIRROR &&
+                                    rs_pl && rs_plen >= BSU_PKT_SIZE_CAN &&
+                                    rs_pl[0] == BSU_PREAMBLE0 && rs_pl[1] == BSU_PREAMBLE1) {
+                                    uint16_t btype = (uint16_t)rs_pl[4] | ((uint16_t)rs_pl[5] << 8);
+                                    if (btype == 0u || btype == 1u) {
+                                        uint32_t can_id =
+                                            (uint32_t)rs_pl[8] | ((uint32_t)rs_pl[9] << 8) |
+                                            ((uint32_t)rs_pl[10] << 16) | ((uint32_t)rs_pl[11] << 24);
+                                        HandleAckFastPath(can_id, &rs_pl[12]);
+                                        CanIdFields f = ParseCanId(can_id);
+                                        int is_ack_packet =
+                                            (f.dir == 1 && rs_pl[12] == CMD_SET_UPDATE_WORD);
+                                        if (!InterlockedCompareExchange(&g_updateRunning, 0, 0) ||
+                                            !is_ack_packet) {
+                                            PostedPacket *pp =
+                                                (PostedPacket *)malloc(sizeof(PostedPacket));
+                                            if (pp) {
+                                                memset(pp, 0, sizeof(*pp));
+                                                pp->kind = 0;
+                                                pp->can_id = can_id;
+                                                memcpy(pp->data, &rs_pl[12], 8);
+                                                pp->bus_label = (uint8_t)btype;
+                                                PostMessageW(g_hwnd, WM_APP_PACKET, 0, (LPARAM)pp);
+                                            }
+                                        }
                                     }
-                                }
-                                int is_ack_packet = (is_dir && rs_cmd == CMD_SET_UPDATE_WORD);
-                                if (!InterlockedCompareExchange(&g_updateRunning, 0, 0) || !is_ack_packet) {
-                                    PostedPacket *pp = (PostedPacket *)malloc(sizeof(PostedPacket));
-                                    if (pp) {
-                                        memset(pp, 0, sizeof(*pp));
-                                        pp->kind = 1;
-                                        pp->bus_label = (uint8_t)type;
-                                        pp->rs_addr = rs_addr;
-                                        pp->rs_cmd = rs_cmd;
-                                        pp->rs_flags = rs_flags;
-                                        pp->rs_payload_len = (rs_plen > 16u) ? 16u : (uint8_t)rs_plen;
-                                        if (rs_pl && pp->rs_payload_len)
-                                            memcpy(pp->rs_payload, rs_pl, pp->rs_payload_len);
-                                        PostMessageW(g_hwnd, WM_APP_PACKET, 0, (LPARAM)pp);
+                                } else {
+                                    if (is_dir && rs_cmd == CMD_SET_UPDATE_WORD) {
+                                        HandleAckRsFastPath(rs_pl, rs_plen);
+                                    }
+                                    if (is_dir && rs_cmd == RS_PANEL_RSP_ACTIVITY &&
+                                        rs_plen >= 10u && rs_pl &&
+                                        rs_pl[0] == RS_BUS_DEV_TYPE_PANEL_BOOTLOADER &&
+                                        rs_addr == g_panelWaitAddr) {
+                                        InterlockedExchange(&g_panelBootSeen, 1);
+                                    }
+                                    if (is_dir && rs_cmd == RS_PANEL_RSP_ACK &&
+                                        rs_addr == g_panelWaitAddr) {
+                                        InterlockedExchange(&g_panelEnterAcked, 1);
+                                    }
+                                    if (is_dir && rs_cmd == CMD_UPDATE_TRANSMIT &&
+                                        rs_addr == g_panelWaitAddr) {
+                                        InterlockedExchange(&g_panelTransmitSeen, 1);
+                                        if (rs_pl && rs_plen >= 1u && rs_pl[0] == 1u) {
+                                            InterlockedExchange(&g_panelTransmitOk, 1);
+                                        } else {
+                                            InterlockedExchange(&g_panelTransmitOk, 0);
+                                        }
+                                    }
+                                    int is_ack_packet = (is_dir && rs_cmd == CMD_SET_UPDATE_WORD);
+                                    if (!InterlockedCompareExchange(&g_updateRunning, 0, 0) ||
+                                        !is_ack_packet) {
+                                        PostedPacket *pp =
+                                            (PostedPacket *)malloc(sizeof(PostedPacket));
+                                        if (pp) {
+                                            memset(pp, 0, sizeof(*pp));
+                                            pp->kind = 1;
+                                            pp->bus_label = (uint8_t)type;
+                                            pp->rs_addr = rs_addr;
+                                            pp->rs_cmd = rs_cmd;
+                                            pp->rs_flags = rs_flags;
+                                            pp->rs_payload_len =
+                                                (rs_plen > 16u) ? 16u : (uint8_t)rs_plen;
+                                            if (rs_pl && pp->rs_payload_len)
+                                                memcpy(pp->rs_payload, rs_pl, pp->rs_payload_len);
+                                            PostMessageW(g_hwnd, WM_APP_PACKET, 0, (LPARAM)pp);
+                                        }
                                     }
                                 }
                             }
@@ -917,6 +1006,9 @@ static void DisconnectSerial(void) {
     }
     g_useTcp = 0;
     InterlockedExchange(&g_connected, 0);
+    InterlockedExchange(&g_ppkyRsCanBridge, 0);
+    if (g_hPpkyCanBridge)
+        SetWindowTextW(g_hPpkyCanBridge, L"CAN↔RS ППКУ");
 }
 
 static int FindOrAddDevice(DeviceInfo d) {
@@ -993,7 +1085,9 @@ static void ResetDeviceVersionAssembly(DeviceInfo *d) {
     d->version_valid = 0;
     d->version = 0;
     d->version_str[0] = '\0';
-    d->version_pkt_next = 0;
+    d->version_frag_mask = 0;
+    d->version_frag_ms = 0;
+    memset(d->version_frags, 0, sizeof(d->version_frags));
 }
 
 static uint32_t ParseLastUint(const char *s) {
@@ -1022,6 +1116,8 @@ static void ParseVersionString(DeviceInfo *d) {
     /* МКУ: "fw=123". ППКУ: "БСУ 4 версия аппаратной части 5" — берём последнее число. */
     if (sscanf(d->version_str, "fw=%u", &fw) == 1) {
         d->version = fw;
+    } else if (sscanf(d->version_str, "boot=%u", &fw) == 1) {
+        d->version = fw;
     } else {
         d->version = ParseLastUint(d->version_str);
     }
@@ -1037,39 +1133,74 @@ static int VersionPayloadEmpty(const uint8_t *data) {
     return 1;
 }
 
+/* Собрать строку из фрагментов 0..N подряд; 0-байт — конец (в т.ч. отдельный term-пакет). */
+static int TryAssembleVersionFromFrags(DeviceInfo *d) {
+    char buf[80];
+    size_t len = 0;
+    unsigned p;
+
+    if (!d) return 0;
+    for (p = 0; p < VERSION_FRAG_MAX; p++) {
+        unsigned i;
+        if ((d->version_frag_mask & (uint16_t)(1u << p)) == 0) {
+            /* Дырка: ждём недостающий фрагмент. */
+            return 0;
+        }
+        for (i = 0; i < VERSION_FRAG_BYTES; i++) {
+            uint8_t c = d->version_frags[p][i];
+            if (c == 0) {
+                if (len >= sizeof(d->version_str))
+                    len = sizeof(d->version_str) - 1;
+                memcpy(d->version_str, buf, len);
+                d->version_str[len] = '\0';
+                ParseVersionString(d);
+                d->version_frag_mask = 0;
+                return 1;
+            }
+            if (len + 1 >= sizeof(buf)) {
+                memcpy(d->version_str, buf, sizeof(d->version_str) - 1);
+                d->version_str[sizeof(d->version_str) - 1] = '\0';
+                ParseVersionString(d);
+                d->version_frag_mask = 0;
+                return 1;
+            }
+            buf[len++] = (char)c;
+        }
+    }
+    return 0;
+}
+
 static void HandleVersionPacket(DeviceInfo *d, const uint8_t *data) {
     uint8_t pkt;
-    size_t len;
-    int i;
+    unsigned i;
 
     if (!d || !data) return;
     pkt = data[1];
     /* Эхо запроса 159 (пустое тело) — не начало строки версии. */
     if (pkt == 0 && VersionPayloadEmpty(data))
         return;
-    if (pkt == 0) {
-        ResetDeviceVersionAssembly(d);
-    } else if (pkt != d->version_pkt_next) {
-        /* Старые фрагменты после повторного 159 не должны сбрасывать сборку. */
+    if (pkt >= VERSION_FRAG_MAX)
         return;
+
+    /* Новый ответ всегда начинается с pkt=0.
+     * Старую отображаемую версию не трогаем — сброс только буфера сборки.
+     * Иначе при битой серии UI залипает на "..." даже если раньше строка была. */
+    if (pkt == 0) {
+        d->version_frag_mask = 0;
+        memset(d->version_frags, 0, sizeof(d->version_frags));
     }
 
-    len = strlen(d->version_str);
-    for (i = 2; i < 8; i++) {
-        if (data[i] == 0) {
-            ParseVersionString(d);
-            d->version_pkt_next = 0;
-            return;
-        }
-        if (len + 1 >= sizeof(d->version_str)) {
-            ParseVersionString(d);
-            d->version_pkt_next = 0;
-            return;
-        }
-        d->version_str[len++] = (char)data[i];
-        d->version_str[len] = '\0';
+    for (i = 0; i < VERSION_FRAG_BYTES; i++)
+        d->version_frags[pkt][i] = data[2 + i];
+    d->version_frag_mask |= (uint16_t)(1u << pkt);
+    d->version_frag_ms = GetTickCount();
+
+    if (TryAssembleVersionFromFrags(d)) {
+        d->version_retries = 0;
+        d->version_req_sent = 1;
+        Logf(L"Версия собрана: %s h=%u l=%u → %hs\r\n",
+             DeviceTypeNameW(d->d_type), d->h_adr, d->l_adr, d->version_str);
     }
-    d->version_pkt_next = (uint8_t)(pkt + 1u);
 }
 
 static int IsUpdatableType(uint8_t d_type) {
@@ -1287,60 +1418,131 @@ static int SelectTargetDeviceDialog(HWND owner, DeviceInfo* out_dev) {
     return 0;
 }
 
+static void ProbeEsp32Version(void);
+
+static void PumpVersionSendQueue(void) {
+    if (!InterlockedCompareExchange(&g_connected, 0, 0)) {
+        g_ver_send_n = 0;
+        g_ver_send_i = 0;
+        KillTimer(g_hwnd, IDT_VERSION_SEND);
+        return;
+    }
+    if (g_ver_send_i >= g_ver_send_n) {
+        KillTimer(g_hwnd, IDT_VERSION_SEND);
+        return;
+    }
+    {
+        int idx = g_ver_send_queue[g_ver_send_i++];
+        if (idx >= 0 && idx < g_devCount && IsUpdatableType(g_devices[idx].d_type))
+            RequestDeviceVersion(&g_devices[idx]);
+    }
+    if (g_ver_send_i >= g_ver_send_n)
+        KillTimer(g_hwnd, IDT_VERSION_SEND);
+}
+
+static void EnqueueVersionRequest(int idx) {
+    int i;
+    if (idx < 0 || idx >= g_devCount) return;
+    for (i = g_ver_send_i; i < g_ver_send_n; i++) {
+        if (g_ver_send_queue[i] == idx) return;
+    }
+    if (g_ver_send_n >= (int)(sizeof(g_ver_send_queue) / sizeof(g_ver_send_queue[0])))
+        return;
+    /* Сразу помечаем «запрос в работе», иначе любой CAN-статус между
+     * постановкой в очередь и реальной отправкой снова вызовет 159 →
+     * два ответа перекрываются, сборка фрагментов никогда не завершается. */
+    g_devices[idx].version_req_sent = 1;
+    g_devices[idx].version_req_ms = GetTickCount();
+    g_ver_send_queue[g_ver_send_n++] = idx;
+    if (g_ver_send_n == g_ver_send_i + 1) {
+        /* Первая заявка в пустой очереди — сразу тик таймера. */
+        SetTimer(g_hwnd, IDT_VERSION_SEND, VERSION_SEND_GAP_MS, NULL);
+        PumpVersionSendQueue();
+    }
+}
+
 static void ForceReadVersions(void) {
+    int i;
+    int queued = 0;
     if (!InterlockedCompareExchange(&g_connected, 0, 0)) {
         MessageBoxW(g_hwnd, L"Сначала подключитесь.", L"Updater", MB_ICONWARNING);
         return;
     }
-    int sent = 0;
-    for (int i = 0; i < g_devCount; i++) {
+    KillTimer(g_hwnd, IDT_VERSION_SEND);
+    g_ver_send_n = 0;
+    g_ver_send_i = 0;
+    for (i = 0; i < g_devCount; i++) {
         if (!IsUpdatableType(g_devices[i].d_type)) continue;
-        ResetDeviceVersionAssembly(&g_devices[i]);
-        g_devices[i].version_req_sent = 0;
+        /* Не очищаем уже показанную версию — только буфер сборки и счётчики.
+         * UI останется со старой строкой, пока не придёт новый полный ответ. */
+        g_devices[i].version_frag_mask = 0;
+        g_devices[i].version_frag_ms = 0;
+        memset(g_devices[i].version_frags, 0, sizeof(g_devices[i].version_frags));
         g_devices[i].version_retries = 0;
+        g_devices[i].version_req_sent = 1;
+        g_devices[i].version_req_ms = GetTickCount();
+        if (g_ver_send_n < (int)(sizeof(g_ver_send_queue) / sizeof(g_ver_send_queue[0]))) {
+            g_ver_send_queue[g_ver_send_n++] = i;
+            queued++;
+        }
         RefreshDeviceListRow(i);
-        RequestDeviceVersion(&g_devices[i]);
-        sent++;
     }
-    if (sent == 0) {
-        Logf(L"Нет устройств для запроса версий.\r\n");
-    } else {
-        Logf(L"Принудительный запрос версий отправлен: %d устройств.\r\n", sent);
+    ProbeEsp32Version();
+    if (queued == 0) {
+        Logf(L"В списке нет МКУ — отправлен только опрос ESP32 (159).\r\n");
+        return;
     }
+    Logf(L"Запрос версий: %d устройств в очереди (интервал %u мс) + опрос ESP32.\r\n",
+         queued, VERSION_SEND_GAP_MS);
+    SetTimer(g_hwnd, IDT_VERSION_SEND, VERSION_SEND_GAP_MS, NULL);
+    PumpVersionSendQueue();
 }
 
-static void EnsureEsp32Device(void) {
-    DeviceInfo d = {0};
-    int idx;
-    d.d_type = DEVICE_ESP32_TYPE;
-    d.last_seen_ms = GetTickCount();
-    idx = FindOrAddDevice(d);
-    if (idx < 0) return;
-    g_devices[idx].last_seen_ms = d.last_seen_ms;
-    if (idx >= ListView_GetItemCount(g_hDevices)) AddDeviceToList(idx);
-    else RefreshDeviceListRow(idx);
-    if (!g_devices[idx].version_valid && !g_devices[idx].version_req_sent)
-        PostMessageW(g_hwnd, WM_APP_REQ_VERSION, (WPARAM)idx, 0);
+static void ProbeEsp32Version(void) {
+    /* Не добавляем ESP32 в список заранее — только шлём 159.
+     * В список попадёт при реальном ответе ESP_CMD (см. WM_APP_PACKET kind=2). */
+    uint8_t data[8] = { CMD_GET_VERSION, 0, 0, 0, 0, 0, 0, 0 };
+    if (!SendBsuEspCmd(data, 8))
+        Logf(L"Не удалось отправить 159 на ESP32 (err=%u)\r\n", g_lastIoError);
 }
 
 static void RetryIncompleteVersions(void) {
     DWORD now;
+    int q;
     if (!InterlockedCompareExchange(&g_connected, 0, 0)) return;
     if (InterlockedCompareExchange(&g_updateRunning, 0, 0)) return;
     now = GetTickCount();
     for (int i = 0; i < g_devCount; i++) {
         DeviceInfo *d = &g_devices[i];
+        DWORD frag_ref;
         if (!IsUpdatableType(d->d_type)) continue;
         if (d->version_valid) continue;
         if (!d->version_req_sent) continue;
         if (d->version_retries >= VERSION_RETRY_MAX) continue;
-        /* Ещё собираем текущую серию пакетов. */
-        if (d->version_pkt_next != 0 && (now - d->last_seen_ms) < 1000u) continue;
+        /* Уже ждёт отправки в очереди — не дублировать. */
+        for (q = g_ver_send_i; q < g_ver_send_n; q++) {
+            if (g_ver_send_queue[q] == i) break;
+        }
+        if (q < g_ver_send_n) continue;
+        /* Ждём только по времени фрагментов версии, не по любому CAN-трафику. */
+        frag_ref = d->version_frag_ms ? d->version_frag_ms : d->version_req_ms;
+        if (d->version_frag_mask != 0 && (now - frag_ref) < VERSION_FRAG_WAIT_MS)
+            continue;
         if ((now - d->version_req_ms) < VERSION_RETRY_MS) continue;
-        ResetDeviceVersionAssembly(d);
-        d->version_retries++;
-        RefreshDeviceListRow(i);
-        RequestDeviceVersion(d);
+        {
+            uint16_t old_mask = d->version_frag_mask;
+            /* Не трогаем version_req_sent: иначе трафик шины снова ставит 159
+             * параллельно с ретраем и ответы перемешиваются. */
+            d->version_frag_mask = 0;
+            d->version_frag_ms = 0;
+            memset(d->version_frags, 0, sizeof(d->version_frags));
+            d->version_retries++;
+            Logf(L"Повтор запроса версии (%s h=%u l=%u), попытка %u/%u, mask=0x%04X\r\n",
+                 DeviceTypeNameW(d->d_type), d->h_adr, d->l_adr,
+                 (unsigned)d->version_retries, (unsigned)VERSION_RETRY_MAX,
+                 (unsigned)old_mask);
+            EnqueueVersionRequest(i);
+        }
     }
 }
 
@@ -1423,11 +1625,16 @@ static void AckBatchBeginLocked(uint32_t batch_start, uint32_t batch_len, const 
 }
 
 static uint32_t AckBatchWordBudgetMs(void) {
+    int ppky = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PPKY_TYPE);
+    if (ppky) {
+        return g_useTcp ? ACK_BATCH_WORD_BUDGET_PPKY_WIFI : ACK_BATCH_WORD_BUDGET_PPKY_USB;
+    }
     return g_useTcp ? ACK_BATCH_WORD_BUDGET_WIFI : ACK_BATCH_WORD_BUDGET_USB;
 }
 
 static uint32_t AckBatchIdleGapMs(uint32_t missing) {
     int panel = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PANEL_TYPE);
+    int ppky = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PPKY_TYPE);
     /* После хотя бы одного ACK: тишина = конец потока или потеря.
      * Для 1–2 хвостов ждём дольше — иначе ложный «Повтор … 1 из 64». */
     if (panel && g_useTcp) {
@@ -1435,6 +1642,13 @@ static uint32_t AckBatchIdleGapMs(uint32_t missing) {
             return ACK_BATCH_IDLE_GAP_PANEL_TAIL_WIFI;
         }
         return ACK_BATCH_IDLE_GAP_PANEL_WIFI;
+    }
+    /* ППКУ SPI: пауза между ACK часто >100 мс — общий USB idle ломает каждую пачку. */
+    if (ppky) {
+        if (missing > 0u && missing <= 2u) {
+            return g_useTcp ? ACK_BATCH_IDLE_GAP_PPKY_TAIL_WIFI : ACK_BATCH_IDLE_GAP_PPKY_TAIL_USB;
+        }
+        return g_useTcp ? ACK_BATCH_IDLE_GAP_PPKY_WIFI : ACK_BATCH_IDLE_GAP_PPKY_USB;
     }
     if (missing > 0u && missing <= 2u) {
         return g_useTcp ? ACK_BATCH_IDLE_GAP_TAIL_WIFI : ACK_BATCH_IDLE_GAP_TAIL_USB;
@@ -1531,6 +1745,9 @@ static int SendUnackedBatchWords(const DeviceInfo *dev, uint32_t can_id, uint32_
         /* Панель RS/WiFi: не заливать inject-очередь ППКУ и RX бутлоадера. */
         if (IsPanelDev(dev) && g_useTcp) {
             Sleep(PANEL_WORD_PACE_MS_WIFI);
+        } else if (IsPpkyDev(dev)) {
+            /* Не заливать SPI page program на ППКУ пачкой без паузы. */
+            Sleep(g_useTcp ? PPKY_WORD_PACE_MS_WIFI : PPKY_WORD_PACE_MS_USB);
         } else if (g_useTcp && ((j + 1u) % 8u) == 0u) {
             /* WiFi CAN: чуть разгрузить мост ESP. */
             Sleep(1);
@@ -1874,6 +2091,20 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
                     Logf(L"Слово 0: пауза 8 с на стирание слота %s.\r\n",
                          is_esp ? L"ESP32 OTA" : L"SPI ППКУ");
                     Sleep(8000);
+                }
+            }
+            if (batch_ok && batch_start + batch_len < total_words) {
+                Sleep(BATCH_SLEEP_MS);
+            }
+        } else if (InterlockedCompareExchange(&g_ppkyRsCanBridge, 0, 0)) {
+            /* COM↔RS: каждая CAN-посылка — type5 + 0xF9 (пачкой type0 свисток не шлёт на ППКУ). */
+            batch_ok = 1;
+            for (uint32_t j = 0; j < batch_len; j++) {
+                if (!SendUpdateWord(&ua->dev, can_id_req, batch_start + j, batch_words[j])) {
+                    batch_ok = 0;
+                    Logf(L"Ошибка отправки слова %u (err=%u)\r\n",
+                         batch_start + j, g_lastIoError);
+                    break;
                 }
             }
             if (batch_ok && batch_start + batch_len < total_words) {
@@ -2244,6 +2475,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             CreateWindowW(L"BUTTON", L"Цель обновления...", WS_CHILD | WS_VISIBLE, 545, 10, 145, 24, hwnd, (HMENU)IDC_BTN_SELECT_TARGET, NULL, NULL);
             CreateWindowW(L"BUTTON", L"Прочитать версии", WS_CHILD | WS_VISIBLE, 695, 10, 130, 24, hwnd, (HMENU)IDC_BTN_FORCE_VERSION, NULL, NULL);
             CreateWindowW(L"BUTTON", L"Собрать все", WS_CHILD | WS_VISIBLE, 830, 10, 110, 24, hwnd, (HMENU)IDC_BTN_COLLECT, NULL, NULL);
+            g_hPpkyCanBridge = CreateWindowW(L"BUTTON", L"CAN↔RS ППКУ", WS_CHILD | WS_VISIBLE,
+                                             945, 10, 130, 24, hwnd, (HMENU)IDC_BTN_PPKY_CAN_BRIDGE, NULL, NULL);
 
             g_hDevices = CreateWindowW(WC_LISTVIEWW, L"", WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_SINGLESEL | WS_BORDER,
                                        10, 44, w - 20, 180, hwnd, (HMENU)IDC_LIST_DEVICES, NULL, NULL);
@@ -2294,6 +2527,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == IDT_VERSION_RETRY)
                 RetryIncompleteVersions();
+            else if (wp == IDT_VERSION_SEND)
+                PumpVersionSendQueue();
             break;
         case WM_COMMAND: {
             if (HIWORD(wp) == CBN_SELCHANGE && LOWORD(wp) == IDC_COMBO_MODE) {
@@ -2308,10 +2543,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                         int ok = IsWifiMode() ? ConnectTcp() : ConnectSerial();
                         if (ok) {
                             SetConnectedUi(1);
-                            EnsureEsp32Device();
                             Logf(IsWifiMode() ? L"Подключено по WiFi. Список устройств очищен.\r\n"
                                               : L"Подключено по USB. Список устройств очищен.\r\n");
-                            Logf(L"ESP32 добавлен в список устройств (команды 159/156/158 через ESP_CMD).\r\n");
+                            Logf(L"Устройства появятся по трафику шины; ESP32 — только после ответа на 159.\r\n");
                         } else {
                             MessageBoxW(hwnd,
                                         IsWifiMode() ? L"Ошибка подключения по WiFi (TCP)."
@@ -2319,6 +2553,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                                         L"Updater", MB_ICONERROR);
                         }
                     } else {
+                        KillTimer(hwnd, IDT_VERSION_SEND);
+                        g_ver_send_n = 0;
+                        g_ver_send_i = 0;
                         DisconnectSerial();
                         SetConnectedUi(0);
                         Logf(L"Отключено.\r\n");
@@ -2327,6 +2564,30 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 case IDC_BTN_SELECT_TARGET: SelectUpdateTarget(); break;
                 case IDC_BTN_FORCE_VERSION: ForceReadVersions(); break;
                 case IDC_BTN_COLLECT: CollectFirmwares(); break;
+                case IDC_BTN_PPKY_CAN_BRIDGE: {
+                    int on = InterlockedCompareExchange(&g_ppkyRsCanBridge, 0, 0) ? 0 : 1;
+                    if (!InterlockedCompareExchange(&g_connected, 0, 0)) {
+                        MessageBoxW(hwnd, L"Сначала подключите COM (свисток RS485).",
+                                    L"Updater", MB_ICONWARNING);
+                        break;
+                    }
+                    if (IsWifiMode()) {
+                        MessageBoxW(hwnd,
+                                    L"CAN↔RS нужен для COM-свистка. По WiFi type 0 уже идёт на CAN ППКУ.",
+                                    L"Updater", MB_ICONINFORMATION);
+                        break;
+                    }
+                    if (!EnablePpkyRsCanBridge(on)) {
+                        MessageBoxW(hwnd, L"Не удалось отправить 0xF7 (зеркало CAN↔RS).",
+                                    L"Updater", MB_ICONERROR);
+                        break;
+                    }
+                    SetWindowTextW(g_hPpkyCanBridge, on ? L"CAN↔RS ВКЛ" : L"CAN↔RS ППКУ");
+                    Logf(on
+                         ? L"CAN↔RS ППКУ ВКЛ: TX через 0xF9, RX зеркало 0xF8 (после 0xF7).\r\n"
+                         : L"CAN↔RS ППКУ ВЫКЛ.\r\n");
+                    break;
+                }
                 case IDC_BTN_START: StartUpdate(); break;
                 case IDC_BTN_STOP: StopUpdate(); break;
             }
@@ -2336,18 +2597,27 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             PostedPacket *pp = (PostedPacket *)lp;
             if (!pp) break;
             if (pp->kind == 2) {
-                if (pp->data[0] == CMD_GET_VERSION) {
+                /* Реальный ответ ESP_CMD — только тогда добавляем ESP32 в список. */
+                if (pp->data[0] == CMD_GET_VERSION ||
+                    pp->data[0] == CMD_SET_UPDATE_WORD ||
+                    pp->data[0] == CMD_UPDATE_TRANSMIT) {
                     int idx = -1;
                     DeviceInfo d = {0};
                     d.d_type = DEVICE_ESP32_TYPE;
                     d.last_seen_ms = GetTickCount();
                     idx = FindOrAddDevice(d);
                     if (idx >= 0) {
+                        int was_new = (idx >= ListView_GetItemCount(g_hDevices));
                         g_devices[idx].d_type = DEVICE_ESP32_TYPE;
                         g_devices[idx].last_seen_ms = d.last_seen_ms;
-                        HandleVersionPacket(&g_devices[idx], pp->data);
-                        if (idx >= ListView_GetItemCount(g_hDevices)) AddDeviceToList(idx);
-                        else RefreshDeviceListRow(idx);
+                        if (pp->data[0] == CMD_GET_VERSION)
+                            HandleVersionPacket(&g_devices[idx], pp->data);
+                        if (was_new) {
+                            AddDeviceToList(idx);
+                            Logf(L"ESP32 обнаружен (ответ ESP_CMD).\r\n");
+                        } else {
+                            RefreshDeviceListRow(idx);
+                        }
                     }
                 }
                 free(pp);
@@ -2428,17 +2698,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                             g_devices[idx].zone = d.zone;
                             g_devices[idx].last_seen_ms = d.last_seen_ms;
                         }
-                        /* Строка в списке — сразу, версия не обязательна. 159 — один раз и не из этого же обработчика. */
+                        /* Строка в списке — сразу, версия не обязательна. 159 — через очередь. */
                         if (!is_ver_pkt &&
                             !g_devices[idx].version_valid &&
                             !g_devices[idx].version_req_sent) {
-                            g_devices[idx].version_req_sent = 1;
                             need_version_request = 1;
                         }
                         if (idx >= ListView_GetItemCount(g_hDevices)) AddDeviceToList(idx);
                         else RefreshDeviceListRow(idx);
                         if (need_version_request)
-                            PostMessageW(g_hwnd, WM_APP_REQ_VERSION, (WPARAM)idx, 0);
+                            EnqueueVersionRequest(idx);
                     }
                 }
             }
@@ -2461,7 +2730,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             int idx = (int)wp;
             if (idx >= 0 && idx < g_devCount &&
                 InterlockedCompareExchange(&g_connected, 0, 0)) {
-                RequestDeviceVersion(&g_devices[idx]);
+                EnqueueVersionRequest(idx);
             }
             break;
         }
@@ -2474,12 +2743,21 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             EnableWindow(g_hStop, FALSE);
             if (g_hVerify) EnableWindow(g_hVerify, TRUE);
             SetBatchUiEnabled(TRUE);
-            /* После update_transmit МКУ перезагружается, и версия могла измениться:
-             * сбрасываем кэш и инициируем повторный опрос целевого МКУ. */
+            /* После update_transmit устройство перезагружается — сброс кэша и повторный опрос. */
             if (g_activeUpdateDevValid) {
                 InvalidateDeviceVersionCache(&g_activeUpdateDev);
                 if (InterlockedCompareExchange(&g_connected, 0, 0)) {
-                    RequestDeviceVersion(&g_activeUpdateDev);
+                    for (int i = 0; i < g_devCount; i++) {
+                        if (g_devices[i].d_type == g_activeUpdateDev.d_type &&
+                            g_devices[i].h_adr == g_activeUpdateDev.h_adr &&
+                            g_devices[i].l_adr == g_activeUpdateDev.l_adr &&
+                            g_devices[i].zone == g_activeUpdateDev.zone) {
+                            EnqueueVersionRequest(i);
+                            break;
+                        }
+                    }
+                    if (g_activeUpdateDev.d_type == DEVICE_ESP32_TYPE)
+                        ProbeEsp32Version();
                 }
             }
             g_activeUpdateDevValid = 0;
@@ -2487,6 +2765,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             break;
         case WM_DESTROY:
             KillTimer(hwnd, IDT_VERSION_RETRY);
+            KillTimer(hwnd, IDT_VERSION_SEND);
+            g_ver_send_n = 0;
+            g_ver_send_i = 0;
             StopUpdate();
             if (g_hUpdaterThread) {
                 WaitForSingleObject(g_hUpdaterThread, 1000);
@@ -2524,7 +2805,7 @@ int APIENTRY wWinMain(HINSTANCE hInst, HINSTANCE hp, LPWSTR cmd, int nCmdShow) {
     RegisterClassW(&wc);
 
     HWND hwnd = CreateWindowW(wc.lpszClassName, APP_TITLE, WS_OVERLAPPEDWINDOW,
-                              CW_USEDEFAULT, CW_USEDEFAULT, 1100, 640, NULL, NULL, hInst, NULL);
+                              CW_USEDEFAULT, CW_USEDEFAULT, 1200, 640, NULL, NULL, hInst, NULL);
     if (!hwnd) {
         WSACleanup();
         return 1;

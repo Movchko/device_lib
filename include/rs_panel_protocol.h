@@ -39,6 +39,15 @@ typedef enum {
     RS_PANEL_CMD_ASSIGN_BY_UID = 0xF5u,
     /* Host→ППКУ: включить WiFi (панели игнорируют). Broadcast addr=0, DIR=0. */
     RS_PANEL_CMD_PPKY_WIFI_ENABLE = 0xF6u,
+    /* Host→ППКУ: вкл/выкл зеркало CAN→RS485. Payload: [enable u8] (0=выкл, ≠0=вкл).
+     * Панели игнорируют (unknown cmd / default). Default после старта — выкл. */
+    RS_PANEL_CMD_PPKY_CAN_MIRROR_SET = 0xF7u,
+    /* ППКУ→шина: поток CAN для sniffer/ПО. addr=0xFF, DIR=0, без ACK.
+     * Payload = полный BSU CAN-кадр 22 байта (как WiFi type 0/1). Панели не принимают 0xFF. */
+    RS_PANEL_CMD_CAN_MIRROR = 0xF8u,
+    /* Host→ППКУ: отправить на шину CAN. addr=0xFF, DIR=0.
+     * Payload = полный BSU CAN 22 байта (type 0/1) — ППКУ кладёт id+data на CAN как есть. */
+    RS_PANEL_CMD_CAN_TO_BUS = 0xF9u,
     /* Команды обновления прошивки панели (совпадают с ServiceCmd МКУ).
      * Unicast на адрес панели; тип в ACTIVITY = DEVICE_PANEL_BOOTLOADER_TYPE. */
     RS_PANEL_CMD_BOOT_RESET_MCU      = 128u,

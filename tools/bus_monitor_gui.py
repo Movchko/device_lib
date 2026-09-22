@@ -111,6 +111,9 @@ from bus_monitor import (
     apply_mku_factory_defaults_all,
     IGNITER_STATUS,
     IGNITER_LINE,
+    BSU_CAN_PKT_SIZE,
+    BSU_PKT_TYPE_CAN,
+    BSU_PKT_TYPE_CAN2,
 )
 
 from ppky_log_stream import (
@@ -121,6 +124,7 @@ from ppky_log_stream import (
     decode_rs_bus_frame,
     encode_rs_bus_frame,
     build_bsu_esp_uart_packet,
+    can_frame_from_full_bsu,
     LOG_PKT_TYPE_RSP,
     LOG_PKT_TYPE_DATA,
     BSU_PKT_TYPE_ESP_UART,
@@ -128,6 +132,10 @@ from ppky_log_stream import (
     RS_BUS_BROADCAST_ADDR,
     RS_PANEL_RSP_ACTIVITY,
     RS_PANEL_CMD_PPKY_WIFI_ENABLE,
+    RS_PANEL_CMD_PPKY_CAN_MIRROR_SET,
+    RS_PANEL_CMD_CAN_MIRROR,
+    RS_PANEL_CMD_CAN_TO_BUS,
+    RS_BUS_ADDR_RESERVED,
     RS_BUS_DEV_TYPE_PANEL_APP,
     RS_BUS_DEV_TYPE_PANEL_BOOTLOADER,
     DEVICE_PANEL_TYPE,
@@ -222,6 +230,9 @@ class BusMonitorGUI:
         self.log_packets: queue.Queue = queue.Queue()
         self._log_rx_total = 0
         self._log_window: "PpkyLogWindow | None" = None
+        # COM↔RS свисток: после 0xF7 TX CAN идёт как type5+0xF9, RX — зеркало 0xF8.
+        self._ppky_rs_can_bridge = False
+        self._rs_tx_seq = 1
 
         self.can_id_req: int | None = None
         self.can_id_rsp: int | None = None
@@ -371,6 +382,8 @@ class BusMonitorGUI:
         Button(conn_frame, text="Soft reset", command=self._send_ppky_soft_reset).pack(side=LEFT, padx=(8, 0))
         Button(conn_frame, text="Hard reset", command=self._send_ppky_hard_reset).pack(side=LEFT, padx=(4, 0))
         Button(conn_frame, text="Вкл WiFi", command=self._send_ppky_enable_wifi).pack(side=LEFT, padx=(8, 0))
+        Button(conn_frame, text="CAN→RS вкл", command=lambda: self._send_ppky_can_mirror(1)).pack(side=LEFT, padx=(8, 0))
+        Button(conn_frame, text="CAN→RS выкл", command=lambda: self._send_ppky_can_mirror(0)).pack(side=LEFT, padx=(4, 0))
 
         # Тест: «ПОЖАР» как от МКУ_ТС (h_adr=1 фиксировано; зона — индекс зоны ППКУ, см. Fire_OnStatusFire)
         Label(conn_frame, text="Зона ППКУ:").pack(side=LEFT, padx=(12, 4))
@@ -688,9 +701,36 @@ class BusMonitorGUI:
         return f"{base_line} C0:{can0} C1:{can1}"
 
     def _handle_esp_uart_frame(self, body: bytes):
-        """BSU type 5: raw RS-кадр панели. ACTIVITY (0x82) — присутствие на шине."""
+        """BSU type 5: raw RS-кадр. ACTIVITY (DIR=1) или CAN-зеркало 0xF8 (DIR=0)."""
         rs = decode_rs_bus_frame(body)
         if not rs:
+            return
+        # ППКУ зеркалит CAN на RS (cmd=0xF8, payload=полный BSU 22B) — как WiFi type 0/1.
+        if (rs["flags"] & RS_BUS_FLAG_DIR) == 0 and rs["cmd"] == RS_PANEL_CMD_CAN_MIRROR:
+            parsed = can_frame_from_full_bsu(rs["payload"])
+            if not parsed:
+                return
+            can_id, data, bus_label = parsed
+            self._pps_packets_in_window += 1
+            self._maybe_auto_h_adr(can_id)
+            self._maybe_igniter_status(can_id, data)
+            self._update_device_status(can_id, data)
+            if is_service_packet(data):
+                p = parse_can_id(can_id)
+                if p["d_type"] == DEVICE_PPKY_TYPE and p["dir"] == 1:
+                    cmd = data[0]
+                    if cmd == SVC_GET_CONFIG_SIZE and len(data) >= 5:
+                        size_bytes = ((data[1] << 24) |
+                                      (data[2] << 16) |
+                                      (data[3] << 8) |
+                                       data[4])
+                        self.msg_queue.put({"cfg_size": size_bytes})
+                    elif cmd == SVC_GET_CONFIG_CRC and len(data) >= 5:
+                        crc = (data[1] << 24) | (data[2] << 16) | (data[3] << 8) | data[4]
+                        if self._last_crc_request == "saved":
+                            self.msg_queue.put({"cfg_crc_saved": crc})
+                        elif self._last_crc_request == "local":
+                            self.msg_queue.put({"cfg_crc_local": crc})
             return
         if (rs["flags"] & RS_BUS_FLAG_DIR) == 0:
             return
@@ -995,6 +1035,7 @@ class BusMonitorGUI:
         self.wifi_port_entry.config(state=NORMAL)
         self._h_adr_auto_detected = False
         self.dpt_emul_enabled_var.set(False)
+        self._ppky_rs_can_bridge = False
         self.msg_queue.put({"log": "[*] Отключено"})
 
     def _is_wifi_transport(self) -> bool:
@@ -1011,6 +1052,30 @@ class BusMonitorGUI:
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return False
+        # Вариант X: на RS-свистке type 0 не доходит до CAN ППКУ — оборачиваем в 0xF9.
+        if (
+            self._ppky_rs_can_bridge
+            and not self._is_wifi_transport()
+            and len(pkt) == BSU_CAN_PKT_SIZE
+        ):
+            pkt_type = pkt[4] | (pkt[5] << 8)
+            if pkt_type in (BSU_PKT_TYPE_CAN, BSU_PKT_TYPE_CAN2):
+                rs = encode_rs_bus_frame(
+                    RS_BUS_ADDR_RESERVED,
+                    self._rs_tx_seq & 0xFF,
+                    0,
+                    RS_PANEL_CMD_CAN_TO_BUS,
+                    pkt,
+                )
+                self._rs_tx_seq = (self._rs_tx_seq + 1) & 0xFF
+                if not rs:
+                    self.msg_queue.put({"log": "[!] CAN→RS wrap 0xF9 failed (encode)"})
+                    return False
+                try:
+                    pkt = build_bsu_esp_uart_packet(rs)
+                except ValueError as e:
+                    self.msg_queue.put({"log": f"[!] CAN→RS wrap 0xF9 failed: {e}"})
+                    return False
         try:
             with self._serial_lock:
                 written = self.ser.write(pkt)
@@ -2076,6 +2141,31 @@ class BusMonitorGUI:
                 self.msg_queue.put(
                     {"log": f">> PPKY EnableWiFi RS (cmd=0xF6)  frame=[{rs.hex()}]"}
                 )
+
+    def _send_ppky_can_mirror(self, enable: int):
+        """Вкл/выкл полное зеркало CAN↔RS485 на ППКУ2 (0xF7 + локальный wrap TX 0xF9)."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        en = 1 if enable else 0
+        rs = encode_rs_bus_frame(
+            RS_BUS_BROADCAST_ADDR, 0, 0, RS_PANEL_CMD_PPKY_CAN_MIRROR_SET, bytes([en])
+        )
+        if not rs:
+            return
+        pkt = build_bsu_esp_uart_packet(rs)
+        label = "ON" if en else "OFF"
+        if self._write_packet(pkt, f"PPKY CAN↔RS mirror {label}"):
+            # _write_packet не должен оборачивать type5; флаг ставим после успешной 0xF7.
+            self._ppky_rs_can_bridge = bool(en)
+            self.msg_queue.put(
+                {
+                    "log": (
+                        f">> PPKY CAN↔RS mirror {label} (cmd=0xF7 enable={en}; "
+                        f"TX wrap 0xF9={'on' if en else 'off'})"
+                    )
+                }
+            )
 
     def _send_mcu_tc_fire(self):
         """Имитация «ПОЖАР» от МКУ_ТС: h_adr в CAN всегда 1; зона — индекс зоны как в конфиге ППКУ (0…).

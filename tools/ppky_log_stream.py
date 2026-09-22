@@ -29,6 +29,10 @@ RS_BUS_FLAG_DIR = 0x01
 RS_BUS_BROADCAST_ADDR = 0x00
 RS_PANEL_RSP_ACTIVITY = 0x82
 RS_PANEL_CMD_PPKY_WIFI_ENABLE = 0xF6
+RS_PANEL_CMD_PPKY_CAN_MIRROR_SET = 0xF7
+RS_PANEL_CMD_CAN_MIRROR = 0xF8
+RS_PANEL_CMD_CAN_TO_BUS = 0xF9
+RS_BUS_ADDR_RESERVED = 0xFF
 RS_BUS_DEV_TYPE_PANEL_APP = 30  # DEVICE_PANEL_TYPE
 RS_BUS_DEV_TYPE_PANEL_BOOTLOADER = 31  # DEVICE_PANEL_BOOTLOADER_TYPE
 DEVICE_PANEL_TYPE = 30
@@ -173,6 +177,21 @@ def can_frame_from_bsu_body(body: bytes) -> tuple[int, bytes, str] | None:
     can_id = struct.unpack("<I", body[:4])[0] & 0x1FFFFFFF
     data = bytes(body[4:12])
     return can_id, data, "CAN1"
+
+
+def can_frame_from_full_bsu(pkt: bytes) -> tuple[int, bytes, str] | None:
+    """Полный BSU CAN (22 байта, как WiFi type 0/1) → can_id, data, bus_label."""
+    if pkt is None or len(pkt) < 22:
+        return None
+    if pkt[0] != 0x55 or pkt[1] != 0xAA:
+        return None
+    pkt_type = pkt[4] | (pkt[5] << 8)
+    parsed = can_frame_from_bsu_body(pkt[8:20])
+    if not parsed:
+        return None
+    can_id, data, _ = parsed
+    bus_label = "CAN2" if pkt_type == 1 else "CAN1"
+    return can_id, data, bus_label
 
 
 def decode_rs_bus_frame(src: bytes) -> dict | None:
