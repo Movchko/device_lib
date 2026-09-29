@@ -131,6 +131,10 @@ from ppky_log_stream import (
     RS_BUS_FLAG_DIR,
     RS_BUS_BROADCAST_ADDR,
     RS_PANEL_RSP_ACTIVITY,
+    RS_PANEL_CMD_PROFILE_SET,
+    RS_PANEL_PROFILE_SET_PANEL_TYPE,
+    PANEL_TYPE_BIG,
+    PANEL_TYPE_SMALL,
     RS_PANEL_CMD_PPKY_WIFI_ENABLE,
     RS_PANEL_CMD_PPKY_CAN_MIRROR_SET,
     RS_PANEL_CMD_CAN_MIRROR,
@@ -233,6 +237,9 @@ class BusMonitorGUI:
         # COM↔RS свисток: после 0xF7 TX CAN идёт как type5+0xF9, RX — зеркало 0xF8.
         self._ppky_rs_can_bridge = False
         self._rs_tx_seq = 1
+        self._last_panel_rs_addr: int | None = None
+        self.panel_type_var = StringVar(value="малая")
+        self.panel_rs_addr_var = StringVar(value="1")
 
         self.can_id_req: int | None = None
         self.can_id_rsp: int | None = None
@@ -384,6 +391,18 @@ class BusMonitorGUI:
         Button(conn_frame, text="Вкл WiFi", command=self._send_ppky_enable_wifi).pack(side=LEFT, padx=(8, 0))
         Button(conn_frame, text="CAN→RS вкл", command=lambda: self._send_ppky_can_mirror(1)).pack(side=LEFT, padx=(8, 0))
         Button(conn_frame, text="CAN→RS выкл", command=lambda: self._send_ppky_can_mirror(0)).pack(side=LEFT, padx=(4, 0))
+
+        Label(conn_frame, text="Панель:").pack(side=LEFT, padx=(12, 2))
+        Entry(conn_frame, textvariable=self.panel_rs_addr_var, width=3).pack(side=LEFT, padx=(0, 4))
+        self.panel_type_combo = ttk.Combobox(
+            conn_frame,
+            textvariable=self.panel_type_var,
+            values=("малая", "большая"),
+            state="readonly",
+            width=8,
+        )
+        self.panel_type_combo.pack(side=LEFT, padx=(0, 4))
+        Button(conn_frame, text="Тип панели", command=self._send_panel_type).pack(side=LEFT, padx=(2, 0))
 
         # Тест: «ПОЖАР» как от МКУ_ТС (h_adr=1 фиксировано; зона — индекс зоны ППКУ, см. Fire_OnStatusFire)
         Label(conn_frame, text="Зона ППКУ:").pack(side=LEFT, padx=(12, 4))
@@ -756,6 +775,8 @@ class BusMonitorGUI:
         )
         key = (DEVICE_PANEL_TYPE, 0, rs["addr"], 0, -1)
         self.device_statuses[key] = (line, time.time())
+        self._last_panel_rs_addr = int(rs["addr"])
+        self.panel_rs_addr_var.set(str(int(rs["addr"])))
         self._pps_packets_in_window += 1
         if not self._refresh_pending:
             self._refresh_pending = True
@@ -2163,6 +2184,48 @@ class BusMonitorGUI:
                     "log": (
                         f">> PPKY CAN↔RS mirror {label} (cmd=0xF7 enable={en}; "
                         f"TX wrap 0xF9={'on' if en else 'off'})"
+                    )
+                }
+            )
+
+    def _send_panel_type(self):
+        """PROFILE_SET 0x06: тип панели (большая/малая) → Flash панели."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        try:
+            addr = int((self.panel_rs_addr_var.get() or "1").strip(), 0)
+        except ValueError:
+            self.msg_queue.put({"log": "[!] Некорректный RS-адрес панели"})
+            return
+        if addr < 1 or addr > 0xFE:
+            self.msg_queue.put({"log": "[!] RS-адрес панели: 1..0xFE"})
+            return
+        size_txt = (self.panel_type_var.get() or "").strip().lower()
+        if size_txt.startswith("мал"):
+            size = PANEL_TYPE_SMALL
+            size_label = "малая"
+        else:
+            size = PANEL_TYPE_BIG
+            size_label = "большая"
+        seq = self._rs_tx_seq & 0xFF
+        self._rs_tx_seq = (self._rs_tx_seq + 1) & 0xFF or 1
+        rs = encode_rs_bus_frame(
+            addr,
+            seq,
+            0,
+            RS_PANEL_CMD_PROFILE_SET,
+            bytes([RS_PANEL_PROFILE_SET_PANEL_TYPE, size]),
+        )
+        if not rs:
+            return
+        pkt = build_bsu_esp_uart_packet(rs)
+        if self._write_packet(pkt, f"Panel PROFILE_SET size={size_label}"):
+            self.msg_queue.put(
+                {
+                    "log": (
+                        f">> Панель addr={addr}: тип={size_label} "
+                        f"(PROFILE_SET 0x06={size}) frame=[{rs.hex()}]"
                     )
                 }
             )

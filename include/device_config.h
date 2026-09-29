@@ -240,6 +240,10 @@ typedef struct DeviceLimitSwitchConfig {
 #define PANEL_CFG_HEADER_MAGIC   0x504E4C32u /* 'P','N','L','2' — v2 с UID/assign */
 #define PANEL_CFG_FORMAT_VERSION 2u
 
+/* Тип корпуса панели (DevicePanelConfig.panel_type / PROFILE_SET 0x06). */
+#define PANEL_TYPE_SMALL 0u /* по умолчанию: нет ПУСК ОБЩИЙ; долгий ПУСК СП → общий пуск */
+#define PANEL_TYPE_BIG   1u /* есть ПУСК ОБЩИЙ, NORM/ERR */
+
 typedef struct DevicePanelConfig {
 	/* RS-адрес на шине: 0x01..0xFE. По умолчанию 0x01. */
 	uint8_t rs_addr;
@@ -259,8 +263,10 @@ typedef struct DevicePanelConfig {
 	uint32_t uid0;
 	uint32_t uid1;
 	uint32_t uid2;
-	/* резерв до VDEVICE_CFG_SIZE (64 байта): 1+1+1+1+2+1+1+12 = 20 */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 20];
+	/* Тип панели: PANEL_TYPE_SMALL / PANEL_TYPE_BIG. */
+	uint8_t panel_type;
+	/* резерв до VDEVICE_CFG_SIZE (64 байта): 1+1+1+1+2+1+1+12+1 = 21 */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 21];
 } DevicePanelConfig;
 
 #ifdef __cplusplus

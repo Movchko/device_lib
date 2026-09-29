@@ -188,6 +188,8 @@ typedef enum {
     RS_PANEL_PROFILE_SET_JOURNAL_LINES = 0x04u,
     /* Смена RS-адреса панели на шине (1..0xFE); сохраняется во Flash. */
     RS_PANEL_PROFILE_SET_RS_ADDR = 0x05u,
+    /* Тип панели: PANEL_TYPE_SMALL(0) / PANEL_TYPE_BIG(1); Flash + CAPS.ui_profile. */
+    RS_PANEL_PROFILE_SET_PANEL_TYPE = 0x06u,
     RS_PANEL_PROFILE_SET_FACTORY_RESET = 0x0Fu
 } RsProfileSetSub;
 
@@ -309,6 +311,7 @@ typedef struct {
         uint16_t led_enable;
         uint8_t journal_lines;
         uint8_t rs_addr; /* PROFILE_SET_RS_ADDR: 0x01..0xFE */
+        uint8_t panel_type; /* PROFILE_SET_PANEL_TYPE: PANEL_TYPE_SMALL/BIG */
     } value;
 } RsPanelProfileSetCmd;
 
