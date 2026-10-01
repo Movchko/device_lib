@@ -8,9 +8,10 @@ bus_monitor.py — монитор шины BSU (CAN over USB)
        python bus_monitor.py COM3 --read-config --h-adr 1   # с указанием адреса ППКУ
        python bus_monitor.py --list   # список портов
 
-Сервисные команды (128–130, 150–155, 200):
+Сервисные команды (128–130, 150–155, 169, 200):
   — Идут от ПК/ППКУ к устройствам (dir=0, стрелка ←).
   — ResetMCU(128): перезагрузка МКУ.
+  — FactoryReset(169): стереть Flash конфига и перезагрузить МКУ с DefaultConfig().
   — StopStartSend(129): остановка/запуск очереди отправки CAN.
   — GetConfigSize(150), GetConfigWord(152): чтение конфигурации (протокол backend).
 """
@@ -67,6 +68,7 @@ SERVICE_CMDS = {
     154: "SaveConfig",
     155: "DefaultConfig",
     157: "SetSystemTime",
+    169: "FactoryReset",
     200: "CircSetAdr",
 }
 
@@ -91,6 +93,9 @@ DEVICE_PPKY_TYPE = 10
 SVC_GET_CONFIG_SIZE = 150
 SVC_GET_CONFIG_CRC  = 151
 SVC_GET_CONFIG_WORD = 152
+SVC_SET_CONFIG_WORD = 153
+SVC_SAVE_CONFIG = 154
+SVC_FACTORY_RESET = 169
 
 # Пожарные сервисные команды (backend.h)
 SVC_FIRE_START_EXTINGUISHMENT = 142
@@ -790,8 +795,6 @@ MIN_PPKY_CFG_BYTES = (
     + FIRE_AND_BYTES_CFG + PPKY_TAIL_BYTES_CFG
 )
 
-SVC_SET_CONFIG_WORD = 153
-SVC_SAVE_CONFIG = 154
 MKU_UID_WORD_COUNT = MKU_UID_BYTES // 4  # 8 слов UniqId
 
 
@@ -866,9 +869,8 @@ def _pack_mkucfg_body(
 
 def build_mku_factory_cfg(d_type: int) -> bytes | None:
     """
-    Полный MKUCfg (2404 байта) как DefaultConfig() в прошивке соответствующей платы.
-    UId обнулён — подставляется из устройства перед записью.
-    Источники: MCU_k1/k2/k3/kr_v097, MCU_TC Core/Src/app.cpp.
+    Образ MKUCfg на стороне ПК. Кнопка «Дефолты МКУ» его не пишет:
+    МКУ по команде 169 сам стирает Flash и на старте вызывает свой DefaultConfig().
     """
     ign = _igniter_reserv_cfg()
     if d_type == 20:  # MCU_K1
@@ -1135,34 +1137,28 @@ def apply_mku_factory_defaults(
     transport_hint: str = "auto",
     progress_callback=None,
 ) -> bool:
-    """Сбросить MKUCfg как DefaultConfig() в прошивке платы, сохранив только UId (адрес/ID)."""
-    uid = bytearray(MKU_UID_BYTES)
-    for word_idx in range(MKU_UID_WORD_COUNT):
-        word_be = read_mku_config_word(
-            ser, bsu, d_type, h_adr, l_adr, zone, word_idx, transport_hint=transport_hint
-        )
-        if word_be is None:
-            return False
-        struct.pack_into(">I", uid, word_idx * 4, word_be)
+    """ServiceCmd_FactoryReset (169): МКУ стирает Flash конфига, отвечает и перезагружается.
 
-    factory = build_mku_factory_cfg(d_type)
-    if factory is None:
-        return False
-
-    new_cfg = bytearray(factory)
-    new_cfg[:MKU_UID_BYTES] = uid
-
-    for n, word_idx in enumerate(range(MKU_TOTAL_WORDS)):
-        pos = word_idx * 4
-        word_be = struct.unpack(">I", new_cfg[pos : pos + 4])[0]
-        if not write_mku_config_word(
-            ser, bsu, d_type, h_adr, l_adr, zone, word_idx, word_be, transport_hint=transport_hint
-        ):
-            return False
-        if progress_callback:
-            progress_callback(n + 1, MKU_TOTAL_WORDS)
-
-    return save_mku_config(ser, bsu, d_type, h_adr, l_adr, zone, transport_hint=transport_hint)
+    Повторно команду не шлём: стирание и отложенный reset уже идут после первого кадра.
+    Ответ приходит по текущему адресу, до перезагрузки.
+    """
+    del progress_callback  # ход по словам больше не нужен: одна команда на МКУ
+    can_id = build_can_id(d_type, h_adr, l_adr, zone, 0)
+    req = bytes([SVC_FACTORY_RESET]) + b"\x00" * 7
+    th = (transport_hint or "auto").strip().lower()
+    total_timeout = 15.0 if th == "wifi" else 5.0
+    rsp = _wait_device_config_response(
+        ser,
+        bsu,
+        can_id,
+        req,
+        SVC_FACTORY_RESET,
+        transport_hint=transport_hint,
+        total_timeout=total_timeout,
+        resend_interval=total_timeout,
+        max_sends=1,
+    )
+    return rsp is not None
 
 
 def apply_mku_factory_defaults_all(
@@ -1172,7 +1168,7 @@ def apply_mku_factory_defaults_all(
     transport_hint: str = "auto",
     mku_progress_callback=None,
 ) -> tuple[int, int]:
-    """Применить заводские настройки к списку МКУ: [(d_type, h, l, zone), ...]."""
+    """FactoryReset каждому МКУ по очереди: [(d_type, h, l, zone), ...]. Ждёт ACK перед следующим."""
     ok = 0
     total = len(mku_list)
     for i, mku in enumerate(mku_list):

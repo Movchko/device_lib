@@ -40,6 +40,7 @@
 #define IDC_EDIT_WIFI_HOST    117
 #define IDC_EDIT_WIFI_PORT    118
 #define IDC_BTN_PPKY_CAN_BRIDGE 119
+#define IDC_CHK_CONTINUE_FAIL 120
 
 #define FW_WORKSPACE_ROOT     L"D:\\work\\stm_workspace\\"
 #define FW_COLLECT_DST        L"D:\\work\\stm_workspace\\firmware_MKU"
@@ -50,7 +51,10 @@
 #define BATCH_SLEEP_MS        1u
 
 #define DEVICE_PPKY_TYPE      10u
-#define DEVICE_ESP32_TYPE     11u
+/* На шине CAN тип 11 = DEVICE_IGNITER_TYPE (поджигатель), НЕ ESP32.
+ * ESP32 в апдейтере — только через ESP_CMD (BSU type 3), свой GUI-тип. */
+#define DEVICE_IGNITER_TYPE   11u
+#define DEVICE_ESP32_TYPE     250u
 /* Совпадает с device_cfg_common.h */
 #define DEVICE_PANEL_TYPE            30u
 #define DEVICE_PANEL_BOOTLOADER_TYPE 31u
@@ -61,7 +65,10 @@
 #define WIFI_DEFAULT_HOST     L"192.168.4.1"
 #define WIFI_DEFAULT_PORT     L"23"
 
-#define ACK_WAIT_MS_PPKY_FIRST      35000u
+#define ACK_WAIT_MS_PPKY_FIRST      90000u
+/* МКУ: UpdateEraseArea() — 18 секторов × 8 КБ, блокирует приём до конца erase. */
+#define ACK_WAIT_MS_MCU_FIRST       35000u
+#define MCU_WORD0_ERASE_PAUSE_MS    8000u
 /* Бюджет ожидания пачки: не сумма старых per-word (64×400 мс ≈ 25 с на 1 lost ACK). */
 #define ACK_BATCH_WORD_BUDGET_USB   25u
 #define ACK_BATCH_WORD_BUDGET_WIFI  60u
@@ -70,21 +77,45 @@
 /* Когда почти вся пачка пришла — подождать отстающий ACK дольше. */
 #define ACK_BATCH_IDLE_GAP_TAIL_USB  300u
 #define ACK_BATCH_IDLE_GAP_TAIL_WIFI 1200u
+/* МКУ по USB-CAN: общий budget 25 мс слишком мал — ACK теряется в хвосте шины,
+ * 8 мгновенных ретраев не помогают (MCU уже записал, а мы не дождались эха). */
+#define ACK_BATCH_WORD_BUDGET_MCU_USB   200u
+#define ACK_BATCH_WORD_BUDGET_MCU_WIFI  350u
+#define ACK_BATCH_IDLE_GAP_MCU_USB      400u
+#define ACK_BATCH_IDLE_GAP_MCU_WIFI     800u
+#define ACK_BATCH_IDLE_GAP_MCU_TAIL_USB  800u
+#define ACK_BATCH_IDLE_GAP_MCU_TAIL_WIFI 1500u
+#define ACK_BATCH_MIN_MCU_MS            1200u
+#define ACK_RETRY_GAP_MCU_MS            80u
+#define ACK_RETRY_MCU                   12
 /* ППКУ: каждое слово — SPI page program; idle 100 мс даёт ложные «6 из 8» на USB.
- * Раньше per-word ждал до 50–200 мс; batch-режим должен ждать не меньше. */
-#define ACK_BATCH_WORD_BUDGET_PPKY_USB     150u
-#define ACK_BATCH_WORD_BUDGET_PPKY_WIFI    200u
-#define ACK_BATCH_IDLE_GAP_PPKY_USB        500u
-#define ACK_BATCH_IDLE_GAP_PPKY_WIFI       800u
-#define ACK_BATCH_IDLE_GAP_PPKY_TAIL_USB   1000u
-#define ACK_BATCH_IDLE_GAP_PPKY_TAIL_WIFI  1500u
+ * Раньше per-word ждал до 50–200 мс; batch-режим должен ждать не меньше.
+ * USB-CAN: hard 500+4×150≈1.1 с мало при потере 1 ACK из пачки. */
+#define ACK_BATCH_WORD_BUDGET_PPKY_USB     400u
+#define ACK_BATCH_WORD_BUDGET_PPKY_WIFI    500u
+#define ACK_BATCH_IDLE_GAP_PPKY_USB        800u
+#define ACK_BATCH_IDLE_GAP_PPKY_WIFI       1200u
+#define ACK_BATCH_IDLE_GAP_PPKY_TAIL_USB   2000u
+#define ACK_BATCH_IDLE_GAP_PPKY_TAIL_WIFI  2500u
+#define ACK_BATCH_MIN_PPKY_MS              8000u
+#define ACK_RETRY_GAP_PPKY_MS              150u
+#define ACK_RETRY_PPKY                     20
+#define PPKY_RETRY_RECOVERY_MS             1500u
 #define PPKY_WORD_PACE_MS_USB              5u
 #define PPKY_WORD_PACE_MS_WIFI             10u
+/* Без ACK: 5 мс мало на загруженной CAN — тихие дырки, CRC UPDATE не сходится. */
+#define PPKY_WORD_PACE_NOACK_MS_USB        20u
+#define PPKY_WORD_PACE_NOACK_MS_WIFI       30u
+/* SPI W25Q: блок 64 КБ = 16384 слов; erase блока без ACK-паузы роняет RX-очередь. */
+#define PPKY_WORD0_ERASE_PAUSE_MS          90000u
+#define PPKY_TRANSMIT_DRAIN_MS             2000u
 /* Панель: erase/program — короткий idle даёт ложные «Повтор пачки». */
 #define ACK_BATCH_IDLE_GAP_PANEL_WIFI      2500u
 #define ACK_BATCH_IDLE_GAP_PANEL_TAIL_WIFI 5000u
 #define PANEL_WORD_PACE_MS_WIFI     30u
-#define PANEL_MAX_BATCH_SIZE        8u
+/* Панель: новый бут — кадр до 4 слов; старый — только 1 слово. UI: 1 или 4/8/12/16. */
+#define PANEL_CHUNK_WORDS           4u
+#define PANEL_MAX_BATCH_SIZE        16u
 #define PANEL_TRANSMIT_WAIT_MS      20000u
 #define ACK_BATCH_MIN_MS            500u
 #define ACK_RETRY_GAP_PANEL_MS      150u
@@ -115,6 +146,7 @@
 #define CMD_SET_UPDATE_WORD    156u
 #define CMD_UPDATE_TRANSMIT    158u
 #define CMD_GET_VERSION        159u
+#define CMD_RESET_MCU          128u
 #define CMD_ENTER_BOOTLOADER   0xF3u
 #define RS_PANEL_RSP_ACTIVITY  0x82u
 #define RS_PANEL_RSP_ACK       0xFEu
@@ -170,7 +202,7 @@ typedef struct {
 static HWND g_hwnd = NULL;
 static HWND g_hPort = NULL, g_hConnect = NULL, g_hDevices = NULL, g_hFile = NULL;
 static HWND g_hStart = NULL, g_hStop = NULL, g_hLog = NULL, g_hProgress = NULL;
-static HWND g_hVerify = NULL, g_hBatch = NULL;
+static HWND g_hVerify = NULL, g_hBatch = NULL, g_hContinueFail = NULL;
 static HWND g_hMode = NULL, g_hWifiHost = NULL, g_hWifiPort = NULL;
 static HWND g_hPpkyCanBridge = NULL;
 
@@ -183,6 +215,7 @@ static volatile LONG g_readerStop = 0;
 static volatile LONG g_updateStop = 0;
 static volatile LONG g_connected = 0;
 static volatile LONG g_updateRunning = 0;
+static volatile LONG g_transmitResult = -1; /* -1 нет ответа, 0 CRC NACK, >0 OK */
 /* COM↔RS свисток: TX CAN через 0xF9, RX через зеркало 0xF8 (после 0xF7). */
 static volatile LONG g_ppkyRsCanBridge = 0;
 
@@ -271,6 +304,20 @@ static int SerialWrite(const uint8_t *buf, DWORD sz);
 static void HandleAckFastPath(uint32_t can_id, const uint8_t data[8]) {
     CanIdFields f = ParseCanId(can_id);
     if (f.dir != 1) return;
+    if (g_activeUpdateDevValid) {
+        if (f.d_type != (g_activeUpdateDev.d_type & 0x7F) ||
+            f.h_adr != g_activeUpdateDev.h_adr ||
+            f.l_adr != (g_activeUpdateDev.l_adr & 0x3F) ||
+            f.zone != (g_activeUpdateDev.zone & 0x7F)) {
+            return;
+        }
+    }
+    if (data[0] == CMD_UPDATE_TRANSMIT) {
+        /* data[1] = status: 0 = CRC UPDATE не сошёлся (без reset). */
+        InterlockedExchange(&g_transmitResult, (LONG)data[1]);
+        WakeAllConditionVariable(&g_ackCv);
+        return;
+    }
     if (data[0] != CMD_SET_UPDATE_WORD) return;
 
     uint32_t idx = ((uint32_t)data[1] << 16) | ((uint32_t)data[2] << 8) | data[3];
@@ -295,22 +342,32 @@ static void HandleAckFastPath(uint32_t can_id, const uint8_t data[8]) {
 
 static void HandleAckRsFastPath(const uint8_t *payload, uint16_t payload_len) {
     uint32_t idx;
-    uint32_t word;
+    uint32_t n_words;
+    uint32_t wi;
     if (!payload || payload_len < 7u) return;
+    if (((payload_len - 3u) % 4u) != 0u) return;
+    n_words = (uint32_t)((payload_len - 3u) / 4u);
+    if (n_words == 0u || n_words > 15u) return;
     idx = ((uint32_t)payload[0] << 16) | ((uint32_t)payload[1] << 8) | payload[2];
-    word = ((uint32_t)payload[3] << 24) | ((uint32_t)payload[4] << 16) |
-           ((uint32_t)payload[5] << 8) | payload[6];
 
     EnterCriticalSection(&g_ackCs);
     if (g_ack.active) {
-        for (uint32_t s = 0; s < g_ack.batch_len; s++) {
-            if (!g_ack.acked[s] &&
-                idx == g_ack.expect_idx[s] &&
-                word == g_ack.expect_word[s]) {
-                g_ack.acked[s] = 1;
-                g_ack.acked_count++;
-                WakeAllConditionVariable(&g_ackCv);
-                break;
+        for (wi = 0; wi < n_words; wi++) {
+            uint32_t word = ((uint32_t)payload[3u + wi * 4u] << 24) |
+                            ((uint32_t)payload[4u + wi * 4u] << 16) |
+                            ((uint32_t)payload[5u + wi * 4u] << 8) |
+                            (uint32_t)payload[6u + wi * 4u];
+            uint32_t expect = idx + wi;
+            uint32_t s;
+            for (s = 0; s < g_ack.batch_len; s++) {
+                if (!g_ack.acked[s] &&
+                    expect == g_ack.expect_idx[s] &&
+                    word == g_ack.expect_word[s]) {
+                    g_ack.acked[s] = 1;
+                    g_ack.acked_count++;
+                    WakeAllConditionVariable(&g_ackCv);
+                    break;
+                }
             }
         }
     }
@@ -468,6 +525,13 @@ static int IsPpkyDev(const DeviceInfo *d) {
     return d && d->d_type == DEVICE_PPKY_TYPE;
 }
 
+static int IsMcuDev(const DeviceInfo *d) {
+    if (!d) return 0;
+    return (d->d_type == 13 || d->d_type == 14 ||
+            d->d_type == 20 || d->d_type == 21 ||
+            d->d_type == 22 || d->d_type == 23);
+}
+
 static DWORD g_lastIoError = 0;
 
 static int SerialWrite(const uint8_t *buf, DWORD sz) {
@@ -572,6 +636,19 @@ static int SendBsuCanPacket(uint32_t can_id, const uint8_t data[8], uint8_t bus_
         return SendBsuEspUart(rs, rs_len);
     }
     return SerialWrite(pkt, sizeof(pkt));
+}
+
+/* ServiceCmd_ResetMCU / RS_PANEL_CMD_BOOT_RESET_MCU = 128.
+ * МКУ/ППКУ — CAN; панель в бутлоадере — RS (ESP_UART). */
+static int SendDeviceResetMcu(const DeviceInfo *dev) {
+    uint8_t data[8] = { CMD_RESET_MCU, 0, 0, 0, 0, 0, 0, 0 };
+    uint32_t can_id;
+    if (!dev || IsEspDev(dev))
+        return 0;
+    if (IsPanelDev(dev))
+        return SendPanelRsCmd(dev->l_adr, CMD_RESET_MCU, NULL, 0);
+    can_id = BuildCanId(dev->d_type, dev->h_adr, dev->l_adr, dev->zone, 0);
+    return SendBsuCanPacket(can_id, data, BSU_PKT_TYPE_CAN1);
 }
 
 static int EnablePpkyRsCanBridge(int enable) {
@@ -1024,7 +1101,8 @@ static int FindOrAddDevice(DeviceInfo d) {
 static const wchar_t* DeviceTypeNameW(uint8_t d_type) {
     switch (d_type) {
         case 10: return L"ППКУ";
-        case 11: return L"ESP32";
+        case DEVICE_ESP32_TYPE: return L"ESP32";
+        case DEVICE_IGNITER_TYPE: return L"Поджигатель";
         case 13: return L"МКУ_IGN";
         case 14: return L"МКУ_TC";
         case 20: return L"МКУ_K1";
@@ -1196,16 +1274,28 @@ static void HandleVersionPacket(DeviceInfo *d, const uint8_t *data) {
     d->version_frag_ms = GetTickCount();
 
     if (TryAssembleVersionFromFrags(d)) {
+        wchar_t ver_w[128];
         d->version_retries = 0;
         d->version_req_sent = 1;
-        Logf(L"Версия собрана: %s h=%u l=%u → %hs\r\n",
-             DeviceTypeNameW(d->d_type), d->h_adr, d->l_adr, d->version_str);
+        VersionStrToWide(d->version_str, ver_w, sizeof(ver_w) / sizeof(ver_w[0]));
+        Logf(L"Версия собрана: %s h=%u l=%u → %s\r\n",
+             DeviceTypeNameW(d->d_type), d->h_adr, d->l_adr, ver_w);
     }
 }
 
 static int IsUpdatableType(uint8_t d_type) {
     return (d_type == DEVICE_PPKY_TYPE ||
             d_type == DEVICE_ESP32_TYPE ||
+            d_type == DEVICE_PANEL_TYPE ||
+            d_type == 13 || d_type == 14 ||
+            d_type == 20 || d_type == 21 || d_type == 22 || d_type == 23);
+}
+
+/* Устройства, которые можно обнаружить по CAN ID на шине.
+ * ESP32 (GUI-тип 250) на CAN не бывает — только через ESP_CMD.
+ * Тип 11 на шине = поджигатель, не цель обновления. */
+static int IsCanDiscoverableType(uint8_t d_type) {
+    return (d_type == DEVICE_PPKY_TYPE ||
             d_type == DEVICE_PANEL_TYPE ||
             d_type == 13 || d_type == 14 ||
             d_type == 20 || d_type == 21 || d_type == 22 || d_type == 23);
@@ -1546,6 +1636,9 @@ static void RetryIncompleteVersions(void) {
     }
 }
 
+static void SnapBatchUiForPanel(void);
+static uint32_t ClampPanelBatchSize(uint32_t v);
+
 static void SelectUpdateTarget(void) {
     DeviceInfo d;
     if (SelectTargetDeviceDialog(g_hwnd, &d)) {
@@ -1554,8 +1647,11 @@ static void SelectUpdateTarget(void) {
         Logf(L"Цель обновления: %s h=%u l=%u z=%u\r\n",
              DeviceTypeNameW(d.d_type), d.h_adr, d.l_adr, d.zone);
         if (d.d_type == DEVICE_PANEL_TYPE) {
-            Logf(L"  панель RS-addr=%u (%s)\r\n", d.l_adr,
-                 (d.rs_dev_type == RS_BUS_DEV_TYPE_PANEL_BOOTLOADER) ? L"bootloader" : L"app");
+            Logf(L"  панель RS-addr=%u (%s); пачка 1 (старый бут) или кратна %u, макс %u.\r\n",
+                 d.l_adr,
+                 (d.rs_dev_type == RS_BUS_DEV_TYPE_PANEL_BOOTLOADER) ? L"bootloader" : L"app",
+                 PANEL_CHUNK_WORDS, PANEL_MAX_BATCH_SIZE);
+            SnapBatchUiForPanel();
         }
         if (d.d_type == DEVICE_ESP32_TYPE) {
             Logf(L"  ESP32: протокол ESP_CMD (тип 3), файл .bin IDF (не *_builder.bin).\r\n");
@@ -1584,22 +1680,28 @@ static void BuildUpdateWordData(uint8_t d[8], uint32_t word_idx, uint32_t word) 
     d[7] = (uint8_t)(word & 0xFF);
 }
 
-static void BuildRsUpdateWordPayload(uint8_t d[7], uint32_t word_idx, uint32_t word) {
-    d[0] = (uint8_t)((word_idx >> 16) & 0xFF);
-    d[1] = (uint8_t)((word_idx >> 8) & 0xFF);
-    d[2] = (uint8_t)(word_idx & 0xFF);
-    d[3] = (uint8_t)((word >> 24) & 0xFF);
-    d[4] = (uint8_t)((word >> 16) & 0xFF);
-    d[5] = (uint8_t)((word >> 8) & 0xFF);
-    d[6] = (uint8_t)(word & 0xFF);
+/* Панель: idx_be24 + N×word_be32 (N=1..15), один кадр / один ACK. */
+static int SendPanelUpdateWords(const DeviceInfo *dev, uint32_t word_idx,
+                                const uint32_t *words, uint32_t n_words) {
+    uint8_t pl[3u + 15u * 4u];
+    uint32_t wi;
+    if (!dev || !words || n_words == 0u || n_words > 15u) return 0;
+    pl[0] = (uint8_t)((word_idx >> 16) & 0xFF);
+    pl[1] = (uint8_t)((word_idx >> 8) & 0xFF);
+    pl[2] = (uint8_t)(word_idx & 0xFF);
+    for (wi = 0; wi < n_words; wi++) {
+        uint32_t w = words[wi];
+        pl[3u + wi * 4u + 0u] = (uint8_t)((w >> 24) & 0xFF);
+        pl[3u + wi * 4u + 1u] = (uint8_t)((w >> 16) & 0xFF);
+        pl[3u + wi * 4u + 2u] = (uint8_t)((w >> 8) & 0xFF);
+        pl[3u + wi * 4u + 3u] = (uint8_t)(w & 0xFF);
+    }
+    return SendPanelRsCmd(dev->l_adr, CMD_SET_UPDATE_WORD, pl, (uint16_t)(3u + n_words * 4u));
 }
 
 static int SendUpdateWord(const DeviceInfo *dev, uint32_t can_id, uint32_t word_idx, uint32_t word) {
-    if (IsPanelDev(dev)) {
-        uint8_t pl[7];
-        BuildRsUpdateWordPayload(pl, word_idx, word);
-        return SendPanelRsCmd(dev->l_adr, CMD_SET_UPDATE_WORD, pl, 7u);
-    }
+    if (IsPanelDev(dev))
+        return SendPanelUpdateWords(dev, word_idx, &word, 1u);
     if (IsEspDev(dev)) {
         uint8_t payload[8];
         BuildUpdateWordData(payload, word_idx, word);
@@ -1626,8 +1728,17 @@ static void AckBatchBeginLocked(uint32_t batch_start, uint32_t batch_len, const 
 
 static uint32_t AckBatchWordBudgetMs(void) {
     int ppky = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PPKY_TYPE);
+    int panel = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PANEL_TYPE);
+    int mcu = (g_activeUpdateDevValid && IsMcuDev(&g_activeUpdateDev));
     if (ppky) {
         return g_useTcp ? ACK_BATCH_WORD_BUDGET_PPKY_WIFI : ACK_BATCH_WORD_BUDGET_PPKY_USB;
+    }
+    /* Панель WiFi: ACK на chunk из 4 слов + flash program — общий 60 мс мало. */
+    if (panel) {
+        return g_useTcp ? 200u : 80u;
+    }
+    if (mcu) {
+        return g_useTcp ? ACK_BATCH_WORD_BUDGET_MCU_WIFI : ACK_BATCH_WORD_BUDGET_MCU_USB;
     }
     return g_useTcp ? ACK_BATCH_WORD_BUDGET_WIFI : ACK_BATCH_WORD_BUDGET_USB;
 }
@@ -1635,6 +1746,7 @@ static uint32_t AckBatchWordBudgetMs(void) {
 static uint32_t AckBatchIdleGapMs(uint32_t missing) {
     int panel = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PANEL_TYPE);
     int ppky = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PPKY_TYPE);
+    int mcu = (g_activeUpdateDevValid && IsMcuDev(&g_activeUpdateDev));
     /* После хотя бы одного ACK: тишина = конец потока или потеря.
      * Для 1–2 хвостов ждём дольше — иначе ложный «Повтор … 1 из 64». */
     if (panel && g_useTcp) {
@@ -1650,6 +1762,12 @@ static uint32_t AckBatchIdleGapMs(uint32_t missing) {
         }
         return g_useTcp ? ACK_BATCH_IDLE_GAP_PPKY_WIFI : ACK_BATCH_IDLE_GAP_PPKY_USB;
     }
+    if (mcu) {
+        if (missing > 0u && missing <= 2u) {
+            return g_useTcp ? ACK_BATCH_IDLE_GAP_MCU_TAIL_WIFI : ACK_BATCH_IDLE_GAP_MCU_TAIL_USB;
+        }
+        return g_useTcp ? ACK_BATCH_IDLE_GAP_MCU_WIFI : ACK_BATCH_IDLE_GAP_MCU_USB;
+    }
     if (missing > 0u && missing <= 2u) {
         return g_useTcp ? ACK_BATCH_IDLE_GAP_TAIL_WIFI : ACK_BATCH_IDLE_GAP_TAIL_USB;
     }
@@ -1660,17 +1778,26 @@ static uint32_t AckBatchHardTimeoutMs(uint32_t batch_start, uint32_t unacked) {
     int ppky = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PPKY_TYPE);
     int esp = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_ESP32_TYPE);
     int panel = (g_activeUpdateDevValid && g_activeUpdateDev.d_type == DEVICE_PANEL_TYPE);
+    int mcu = (g_activeUpdateDevValid && IsMcuDev(&g_activeUpdateDev));
     uint32_t per = AckBatchWordBudgetMs();
+    uint32_t min_ms = ACK_BATCH_MIN_MS;
     uint32_t t;
 
-    if (unacked == 0u) {
-        return ACK_BATCH_MIN_MS;
+    if (mcu) {
+        min_ms = ACK_BATCH_MIN_MCU_MS;
+    } else if (ppky) {
+        min_ms = ACK_BATCH_MIN_PPKY_MS;
     }
-    t = ACK_BATCH_MIN_MS + unacked * per;
-    /* Слово 0 ППКУ/панели/ESP32: erase до ~35 с — только для первой пачки. */
-    if (batch_start == 0u && (ppky || panel || esp)) {
+
+    if (unacked == 0u) {
+        return min_ms;
+    }
+    t = min_ms + unacked * per;
+    /* Слово 0: erase слота (ППКУ — весь UPDATE 512 КБ SPI / панель / ESP OTA / МКУ). */
+    if (batch_start == 0u && (ppky || panel || esp || mcu)) {
         uint32_t rest = (unacked > 1u) ? ((unacked - 1u) * per) : 0u;
-        uint32_t first = ACK_WAIT_MS_PPKY_FIRST + rest;
+        uint32_t first_ms = mcu ? ACK_WAIT_MS_MCU_FIRST : ACK_WAIT_MS_PPKY_FIRST;
+        uint32_t first = first_ms + rest;
         if (first > t) {
             t = first;
         }
@@ -1731,6 +1858,39 @@ static int SendUnackedBatchWords(const DeviceInfo *dev, uint32_t can_id, uint32_
     memcpy(already, g_ack.acked, n);
     LeaveCriticalSection(&g_ackCs);
 
+    /* Панель: кадр = до PANEL_CHUNK_WORDS подряд (один flash-quad / один ACK). */
+    if (IsPanelDev(dev)) {
+        j = 0;
+        while (j < n) {
+            uint32_t run;
+            uint32_t k;
+            if (already[j]) {
+                j++;
+                continue;
+            }
+            if (InterlockedCompareExchange(&g_updateStop, 0, 0))
+                return 0;
+            run = 1;
+            while (j + run < n && !already[j + run] && run < PANEL_CHUNK_WORDS)
+                run++;
+            if (!SendPanelUpdateWords(dev, batch_start + j, &batch_words[j], run)) {
+                Logf(L"Ошибка отправки слов %u..%u панели (err=%u)\r\n",
+                     batch_start + j, batch_start + j + run - 1u, g_lastIoError);
+                return 0;
+            }
+            /* Не слать следующий кадр поверх erase на слове 0. */
+            if ((batch_start + j) == 0u) {
+                Sleep(8000);
+            } else if (g_useTcp) {
+                Sleep(PANEL_WORD_PACE_MS_WIFI);
+            }
+            for (k = 0; k < run; k++)
+                already[j + k] = 1; /* локально: не слать снова в этом проходе */
+            j += run;
+        }
+        return 1;
+    }
+
     for (j = 0; j < n; j++) {
         if (already[j]) {
             continue;
@@ -1742,14 +1902,13 @@ static int SendUnackedBatchWords(const DeviceInfo *dev, uint32_t can_id, uint32_
             Logf(L"Ошибка отправки слова %u (err=%u)\r\n", batch_start + j, g_lastIoError);
             return 0;
         }
-        /* Панель RS/WiFi: не заливать inject-очередь ППКУ и RX бутлоадера. */
-        if (IsPanelDev(dev) && g_useTcp) {
-            Sleep(PANEL_WORD_PACE_MS_WIFI);
-        } else if (IsPpkyDev(dev)) {
-            /* Не заливать SPI page program на ППКУ пачкой без паузы. */
-            Sleep(g_useTcp ? PPKY_WORD_PACE_MS_WIFI : PPKY_WORD_PACE_MS_USB);
+        if (IsPpkyDev(dev)) {
+            uint32_t wi = batch_start + j;
+            /* Слово 0: erase 512 КБ на устройстве — ждём в WaitAckBatch. */
+            if (wi != 0u) {
+                Sleep(g_useTcp ? PPKY_WORD_PACE_MS_WIFI : PPKY_WORD_PACE_MS_USB);
+            }
         } else if (g_useTcp && ((j + 1u) % 8u) == 0u) {
-            /* WiFi CAN: чуть разгрузить мост ESP. */
             Sleep(1);
         }
     }
@@ -1758,7 +1917,11 @@ static int SendUnackedBatchWords(const DeviceInfo *dev, uint32_t can_id, uint32_
 
 static int RunVerifyBatch(const DeviceInfo *dev, uint32_t can_id, uint32_t batch_start, uint32_t batch_len,
                           const uint32_t *batch_words) {
-    int max_retries = (batch_start == 0u) ? ACK_RETRY_FIRST_WORD : ACK_RETRY_NORMAL;
+    int is_mcu = IsMcuDev(dev);
+    int is_ppky = IsPpkyDev(dev);
+    int max_retries = (batch_start == 0u) ? ACK_RETRY_FIRST_WORD
+                                          : (is_mcu ? ACK_RETRY_MCU
+                                                    : (is_ppky ? ACK_RETRY_PPKY : ACK_RETRY_NORMAL));
     int attempt;
 
     EnterCriticalSection(&g_ackCs);
@@ -1788,9 +1951,19 @@ static int RunVerifyBatch(const DeviceInfo *dev, uint32_t can_id, uint32_t batch
                      batch_start, batch_start + batch_len - 1u, missing, batch_len,
                      attempt + 1, max_retries);
             }
-            /* Дать RS/ESP дойти ACK и не столкнуть следующий quad поверх дырки. */
-            if (IsPanelDev(dev) && g_useTcp) {
+            /* Пауза до ретрая: поймать запоздавший ACK и не забить шину. */
+            if (is_mcu) {
+                Sleep(ACK_RETRY_GAP_MCU_MS * (uint32_t)attempt);
+            } else if (is_ppky) {
+                Sleep(ACK_RETRY_GAP_PPKY_MS * (uint32_t)attempt);
+            } else if (IsPanelDev(dev) && g_useTcp) {
                 Sleep(ACK_RETRY_GAP_PANEL_MS);
+            }
+            EnterCriticalSection(&g_ackCs);
+            missing = g_ack.batch_len - g_ack.acked_count;
+            LeaveCriticalSection(&g_ackCs);
+            if (missing == 0u) {
+                break;
             }
         }
 
@@ -1799,6 +1972,37 @@ static int RunVerifyBatch(const DeviceInfo *dev, uint32_t can_id, uint32_t batch
         }
         if (WaitAckBatch(batch_start)) {
             break;
+        }
+        /* ППКУ: после серии таймаутов — длинная пауза и ещё попытки (SPI/шина отходят). */
+        if (is_ppky && attempt + 1 == max_retries) {
+            Logf(L"ППКУ: recovery pause %u мс перед финальными попытками слова %u.\r\n",
+                 PPKY_RETRY_RECOVERY_MS, batch_start);
+            Sleep(PPKY_RETRY_RECOVERY_MS);
+        }
+    }
+
+    /* Доп. recovery-раунд для ППКУ (старый FW без идемпотентной записи). */
+    if (is_ppky) {
+        uint32_t missing_rec;
+        EnterCriticalSection(&g_ackCs);
+        missing_rec = g_ack.batch_len - g_ack.acked_count;
+        LeaveCriticalSection(&g_ackCs);
+        if (missing_rec > 0u) {
+            int rec;
+            Logf(L"ППКУ: recovery-раунд для слов %u-%u.\r\n",
+                 batch_start, batch_start + batch_len - 1u);
+            Sleep(PPKY_RETRY_RECOVERY_MS);
+            for (rec = 0; rec < 5; rec++) {
+                EnterCriticalSection(&g_ackCs);
+                missing_rec = g_ack.batch_len - g_ack.acked_count;
+                LeaveCriticalSection(&g_ackCs);
+                if (missing_rec == 0u) break;
+                if (!SendUnackedBatchWords(dev, can_id, batch_start, batch_words)) {
+                    goto fail;
+                }
+                if (WaitAckBatch(batch_start)) break;
+                Sleep(PPKY_RETRY_RECOVERY_MS);
+            }
         }
     }
 
@@ -1829,6 +2033,7 @@ typedef struct {
     DeviceInfo dev;
     wchar_t file_path[MAX_PATH];
     int verify_packets;
+    int continue_on_fail;
     uint32_t batch_size;
 } UpdaterArgs;
 
@@ -1840,6 +2045,24 @@ static uint32_t ReadBatchSizeFromUi(void) {
     if (v < (long)MIN_BATCH_SIZE) v = (long)MIN_BATCH_SIZE;
     if (v > (long)MAX_BATCH_SIZE) v = (long)MAX_BATCH_SIZE;
     return (uint32_t)v;
+}
+
+/* Панель: 1 слово (старый бутлоадер) либо 4, 8, 12, 16. */
+static uint32_t ClampPanelBatchSize(uint32_t v) {
+    if (v <= 1u) return 1u;
+    if (v > PANEL_MAX_BATCH_SIZE) v = PANEL_MAX_BATCH_SIZE;
+    v = (v / PANEL_CHUNK_WORDS) * PANEL_CHUNK_WORDS;
+    if (v < PANEL_CHUNK_WORDS) v = PANEL_CHUNK_WORDS;
+    return v;
+}
+
+static void SnapBatchUiForPanel(void) {
+    uint32_t v;
+    wchar_t buf[16];
+    if (!g_hBatch) return;
+    v = ClampPanelBatchSize(ReadBatchSizeFromUi());
+    wsprintfW(buf, L"%u", v);
+    SetWindowTextW(g_hBatch, buf);
 }
 
 static void SetBatchUiEnabled(int enabled) {
@@ -1947,6 +2170,8 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
     UpdaterArgs *ua = (UpdaterArgs *)arg;
     int is_panel = IsPanelDev(&ua->dev);
     int is_esp = IsEspDev(&ua->dev);
+    int is_ppky = IsPpkyDev(&ua->dev);
+    int is_mcu = IsMcuDev(&ua->dev);
     FILE *fp = _wfopen(ua->file_path, L"rb");
     if (!fp) {
         PostMessageW(g_hwnd, WM_APP_UPD_DONE, 0, 0);
@@ -2011,29 +2236,35 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
             PostMessageW(g_hwnd, WM_APP_UPD_DONE, 0, 0);
             return 0;
         }
-        if (ua->batch_size > PANEL_MAX_BATCH_SIZE) {
-            Logf(L"Панель WiFi/RS: пачка ограничена до %u (было %u).\r\n",
-                 PANEL_MAX_BATCH_SIZE, ua->batch_size);
-            ua->batch_size = PANEL_MAX_BATCH_SIZE;
+        ua->batch_size = ClampPanelBatchSize(ua->batch_size);
+        if (ua->batch_size == 1u) {
+            Logf(L"Панель: по 1 слову в кадре 156 (старый бутлоадер), пачка UI=1 (erase на слове 0 до ~35 с).\r\n");
+        } else {
+            Logf(L"Панель: мультислово 156 по %u слов/кадр, пачка UI=%u (erase на первом кадре до ~35 с).\r\n",
+                 PANEL_CHUNK_WORDS, ua->batch_size);
         }
-        Logf(L"Панель: первое слово — erase flash (до ~35 с), дальше пачками по %u.\r\n",
-             ua->batch_size);
     }
 
     SendMessageW(g_hProgress, PBM_SETRANGE32, 0, total_words);
     SendMessageW(g_hProgress, PBM_SETPOS, 0, 0);
     if (ua->verify_packets) {
-        Logf(L"Старт обновления: words=%u, верификация=вкл, пачка=%u (ACK всей пачки)%s\r\n",
-             total_words, ua->batch_size, is_panel ? L", RS/ESP_UART" : L"");
-        if (ua->dev.d_type == DEVICE_PPKY_TYPE) {
-            Logf(L"ППКУ: первое слово может занять до 35 с (стирание SPI).\r\n");
+        Logf(L"Старт обновления: words=%u, верификация=вкл, пачка=%u (ACK всей пачки)%s%s\r\n",
+             total_words, ua->batch_size, is_panel ? L", RS/ESP_UART" : L"",
+             ua->continue_on_fail ? L", продолжать после неудачи" : L"");
+        if (is_ppky) {
+            Logf(L"ППКУ: слово 0 — стирание всего слота UPDATE (512 КБ SPI), до ~%u с.\r\n",
+                 (unsigned)(ACK_WAIT_MS_PPKY_FIRST / 1000u));
         }
         if (is_esp) {
             Logf(L"ESP32: первое слово может занять до 35 с (стирание OTA-слота).\r\n");
         }
+        if (is_mcu) {
+            Logf(L"МКУ: первое слово — erase UPDATE-слота (до ~35 с); пачка ждёт ACK слова 0.\r\n");
+        }
     } else {
-        Logf(L"Старт обновления: words=%u, верификация=выкл, пачка=%u%s\r\n",
-             total_words, ua->batch_size, is_panel ? L", RS/ESP_UART" : L"");
+        Logf(L"Старт обновления: words=%u, верификация=выкл, пачка=%u%s%s\r\n",
+             total_words, ua->batch_size, is_panel ? L", RS/ESP_UART" : L"",
+             ua->continue_on_fail ? L", продолжать после неудачи" : L"");
     }
 
     size_t batch_cap = (size_t)ua->batch_size * BSU_PKT_SIZE_CAN;
@@ -2045,6 +2276,7 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
     }
 
     uint32_t batch_start = 0;
+    uint32_t skipped_words = 0;
     for (; batch_start < total_words; ) {
         if (InterlockedCompareExchange(&g_updateStop, 0, 0)) {
             Logf(L"Обновление остановлено пользователем.\r\n");
@@ -2061,13 +2293,14 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
         }
 
         int batch_ok = 0;
-        int is_ppky = (ua->dev.d_type == DEVICE_PPKY_TYPE);
         if (ua->verify_packets) {
-            /* Панель: слово 0 = erase flash до ~35 с. Не слать остальную пачку
-             * до ACK слова 0 — иначе кадры копятся в RX бутлоадера под POLL/erase. */
-            if ((is_panel || is_esp) && batch_start == 0u && batch_len > 1u) {
+            /* Панель: весь batch мультисловами (первый кадр = erase+до 3 слов).
+             * ESP/МКУ/ППКУ: слово 0 отдельно — иначе пачка теряется на erase. */
+            if (is_panel) {
+                batch_ok = RunVerifyBatch(&ua->dev, can_id_req, batch_start, batch_len, batch_words);
+            } else if ((is_esp || is_mcu || is_ppky) && batch_start == 0u && batch_len > 1u) {
                 Logf(L"%s: сначала слово 0 (erase), затем пачка 1..%u.\r\n",
-                     is_esp ? L"ESP32" : L"Панель",
+                     is_esp ? L"ESP32" : (is_ppky ? L"ППКУ" : L"МКУ"),
                      batch_len - 1u);
                 batch_ok = RunVerifyBatch(&ua->dev, can_id_req, 0u, 1u, batch_words);
                 if (batch_ok) {
@@ -2077,20 +2310,53 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
             } else {
                 batch_ok = RunVerifyBatch(&ua->dev, can_id_req, batch_start, batch_len, batch_words);
             }
-        } else if (is_panel || is_ppky || is_esp) {
-            /* ППКУ/ESP на слово 0 стирают слот: пачка без паузы теряется. */
+        } else if (is_panel) {
+            /* Без верификации: группы по PANEL_CHUNK_WORDS. */
             batch_ok = 1;
-            for (uint32_t j = 0; j < batch_len; j++) {
-                if (!SendUpdateWord(&ua->dev, can_id_req, batch_start + j, batch_words[j])) {
+            for (uint32_t j = 0; j < batch_len; ) {
+                uint32_t run = PANEL_CHUNK_WORDS;
+                if (j + run > batch_len) run = batch_len - j;
+                if (!SendPanelUpdateWords(&ua->dev, batch_start + j, &batch_words[j], run)) {
                     batch_ok = 0;
-                    Logf(L"Ошибка отправки слова %u (err=%u)\r\n",
-                         batch_start + j, g_lastIoError);
+                    Logf(L"Ошибка отправки слов %u..%u (err=%u)\r\n",
+                         batch_start + j, batch_start + j + run - 1u, g_lastIoError);
                     break;
                 }
-                if ((is_ppky || is_esp) && (batch_start + j) == 0u) {
-                    Logf(L"Слово 0: пауза 8 с на стирание слота %s.\r\n",
-                         is_esp ? L"ESP32 OTA" : L"SPI ППКУ");
+                if (batch_start + j == 0u) {
+                    Logf(L"Слово 0: пауза 8 с на erase панели.\r\n");
                     Sleep(8000);
+                } else if (g_useTcp) {
+                    Sleep(PANEL_WORD_PACE_MS_WIFI);
+                }
+                j += run;
+            }
+            if (batch_ok && batch_start + batch_len < total_words) {
+                Sleep(BATCH_SLEEP_MS);
+            }
+        } else if (is_ppky || is_esp || is_mcu) {
+            /* Без ACK: слово 0 ППКУ — пауза на erase всего слота UPDATE. */
+            batch_ok = 1;
+            for (uint32_t j = 0; j < batch_len; j++) {
+                uint32_t wi = batch_start + j;
+                if (!SendUpdateWord(&ua->dev, can_id_req, wi, batch_words[j])) {
+                    batch_ok = 0;
+                    Logf(L"Ошибка отправки слова %u (err=%u)\r\n", wi, g_lastIoError);
+                    break;
+                }
+                if (is_ppky) {
+                    if (wi == 0u) {
+                        Logf(L"Слово 0: пауза %u с — стирание слота UPDATE ППКУ (512 КБ SPI).\r\n",
+                             PPKY_WORD0_ERASE_PAUSE_MS / 1000u);
+                        Sleep(PPKY_WORD0_ERASE_PAUSE_MS);
+                    } else {
+                        Sleep(g_useTcp ? PPKY_WORD_PACE_NOACK_MS_WIFI
+                                       : PPKY_WORD_PACE_NOACK_MS_USB);
+                    }
+                } else if ((is_esp || is_mcu) && wi == 0u) {
+                    Logf(L"Слово 0: пауза %u с на стирание слота %s.\r\n",
+                         MCU_WORD0_ERASE_PAUSE_MS / 1000u,
+                         is_esp ? L"ESP32 OTA" : L"Flash МКУ");
+                    Sleep(is_mcu ? MCU_WORD0_ERASE_PAUSE_MS : 8000);
                 }
             }
             if (batch_ok && batch_start + batch_len < total_words) {
@@ -2127,40 +2393,140 @@ static DWORD WINAPI UpdaterThreadProc(LPVOID arg) {
             }
         }
 
-        if (!batch_ok) break;
+        if (!batch_ok) {
+            if (ua->continue_on_fail) {
+                uint32_t skip_n = batch_len;
+                uint32_t j;
+                EnterCriticalSection(&g_ackCs);
+                if (g_ack.batch_len == batch_len && g_ack.batch_start == batch_start) {
+                    skip_n = 0;
+                    for (j = 0; j < g_ack.batch_len; j++) {
+                        if (!g_ack.acked[j]) {
+                            Logf(L"Пропуск слова %u (нет ACK, продолжаем).\r\n",
+                                 g_ack.expect_idx[j]);
+                            skip_n++;
+                        }
+                    }
+                }
+                g_ack.active = 0;
+                LeaveCriticalSection(&g_ackCs);
+                if (skip_n == 0u) {
+                    Logf(L"Пропуск пачки %u-%u после исчерпания попыток (продолжать после неудачи).\r\n",
+                         batch_start, batch_start + batch_len - 1u);
+                    skip_n = batch_len;
+                }
+                skipped_words += skip_n;
+                batch_start += batch_len;
+                PostMessageW(g_hProgress, PBM_SETPOS, batch_start, 0);
+                continue;
+            }
+            break;
+        }
 
         batch_start += batch_len;
         PostMessageW(g_hProgress, PBM_SETPOS, batch_start, 0);
+        if (ua->verify_packets && is_ppky &&
+            (batch_start == batch_len || (batch_start % 2048u) == 0u ||
+             batch_start >= total_words)) {
+            Logf(L"ППКУ progress: %u / %u слов (ACK ok).\r\n", batch_start, total_words);
+        }
     }
 
     if (!InterlockedCompareExchange(&g_updateStop, 0, 0) && batch_start >= total_words) {
         if (is_panel) {
             if (WaitPanelTransmit(ua->dev.l_adr)) {
-                Logf(L"ИТОГ: УСПЕХ — прошивка панели записана и запущена.\r\n");
+                if (skipped_words) {
+                    Logf(L"ИТОГ: передача с пропусками — пропущено слов=%u из %u; панель запущена.\r\n",
+                         skipped_words, total_words);
+                } else {
+                    Logf(L"ИТОГ: УСПЕХ — прошивка панели записана и запущена.\r\n");
+                }
             } else {
                 Logf(L"ИТОГ: ОШИБКА — слова переданы, но старт приложения не подтверждён.\r\n");
                 Logf(L"Панель, скорее всего, в бутлоадере; нужен повторный update _builder.bin.\r\n");
+                if (SendDeviceResetMcu(&ua->dev)) {
+                    Logf(L"Панель: отправлен BOOT_RESET_MCU (128) после сбоя UPDATE_TRANSMIT.\r\n");
+                    Sleep(1500);
+                }
             }
         } else if (is_esp) {
             uint8_t endd[8] = { CMD_UPDATE_TRANSMIT, 0, 0, 0, 0, 0, 0, 0 };
             SendBsuEspCmd(endd, 8);
             Logf(L"Команда update_transmit отправлена на ESP32 (ESP_CMD).\r\n");
-            Logf(L"ИТОГ: передача завершена (words=%u). ESP32 перезагрузится в новый образ.\r\n",
-                 total_words);
+            if (skipped_words) {
+                Logf(L"ИТОГ: передача с пропусками — пропущено слов=%u из %u.\r\n",
+                     skipped_words, total_words);
+            } else {
+                Logf(L"ИТОГ: передача завершена (words=%u). ESP32 перезагрузится в новый образ.\r\n",
+                     total_words);
+            }
         } else {
+            if (is_ppky) {
+                Logf(L"ППКУ: пауза %u с перед update_transmit (дописать SPI/очередь CAN).\r\n",
+                     PPKY_TRANSMIT_DRAIN_MS / 1000u);
+                Sleep(PPKY_TRANSMIT_DRAIN_MS);
+            }
+            InterlockedExchange(&g_transmitResult, -1);
             uint8_t endd[8] = { CMD_UPDATE_TRANSMIT, 0, 0, 0, 0, 0, 0, 0 };
             SendBsuCanPacket(can_id_req, endd, BSU_PKT_TYPE_CAN1);
             Logf(L"Команда update_transmit отправлена.\r\n");
-            Logf(L"ИТОГ: передача завершена (words=%u).\r\n", total_words);
+            if (is_ppky) {
+                /* Ждём NACK CRC (status=0). При успехе устройство делает reset — ответа может не быть. */
+                DWORD t0 = GetTickCount();
+                while ((GetTickCount() - t0) < 15000u &&
+                       !InterlockedCompareExchange(&g_updateStop, 0, 0)) {
+                    LONG tr = InterlockedCompareExchange(&g_transmitResult, -1, -1);
+                    if (tr == 0) {
+                        Logf(L"ППКУ: UPDATE_TRANSMIT NACK — CRC слота UPDATE не сошёлся, reset не выполнен. "
+                             L"Версия не сменится.\r\n");
+                        break;
+                    }
+                    if (tr > 0) {
+                        Logf(L"ППКУ: UPDATE_TRANSMIT OK (status=%ld).\r\n", tr);
+                        break;
+                    }
+                    Sleep(50);
+                }
+            }
+            if (skipped_words) {
+                Logf(L"ИТОГ: передача с пропусками — пропущено слов=%u из %u.\r\n",
+                     skipped_words, total_words);
+                Logf(L"Внимание: бутлоадер ППКУ/МКУ сверит CRC образа — дырки в UPDATE "
+                     L"обычно отклонят прошивку, останется старая версия.\r\n");
+            } else {
+                Logf(L"ИТОГ: передача завершена (words=%u).\r\n", total_words);
+                if (is_ppky) {
+                    Logf(L"После reset бутлоадер применит UPDATE (если CRC ок) и выставит Program WD.\r\n"
+                         L"Нужны: новый *_builder.bin, прошивка бутлоадера с WriteProgramWatchDog, "
+                         L"приложение с проверкой CRC до transmit.\r\n");
+                }
+            }
         }
     } else if (InterlockedCompareExchange(&g_updateStop, 0, 0)) {
         Logf(L"ИТОГ: ОСТАНОВЛЕНО пользователем на слове %u из %u.\r\n",
              batch_start, total_words);
+        if (is_mcu || is_ppky || is_panel) {
+            if (SendDeviceResetMcu(&ua->dev)) {
+                Logf(is_panel
+                     ? L"Панель: отправлен BOOT_RESET_MCU (128) — выход из незавершённого обновления.\r\n"
+                     : L"Отправлен ResetMCU (128) — сброс незавершённого UPDATE-слота.\r\n");
+                Sleep(is_panel ? 1500 : 800);
+            } else {
+                Logf(L"Не удалось отправить ResetMCU (err=%u).\r\n", g_lastIoError);
+            }
+        }
     } else {
         Logf(L"ИТОГ: ОШИБКА — прервано на слове %u из %u, update_transmit не отправлен.\r\n",
              batch_start, total_words);
-        if (is_panel) {
-            Logf(L"Образ панели неполный — устройство останется в бутлоадере до успешного обновления.\r\n");
+        if (is_mcu || is_ppky || is_panel) {
+            if (SendDeviceResetMcu(&ua->dev)) {
+                Logf(is_panel
+                     ? L"Панель: отправлен BOOT_RESET_MCU (128) — перезапуск после неуспешного обновления.\r\n"
+                     : L"Отправлен ResetMCU (128) — сброс незавершённого UPDATE-слота.\r\n");
+                Sleep(is_panel ? 1500 : 800);
+            } else {
+                Logf(L"Не удалось отправить ResetMCU (err=%u).\r\n", g_lastIoError);
+            }
         }
     }
 
@@ -2224,15 +2590,24 @@ static void StartUpdate(void) {
     g_activeUpdateDevValid = 1;
     wcsncpy(ua->file_path, path, MAX_PATH - 1);
     ua->verify_packets = (g_hVerify && SendMessageW(g_hVerify, BM_GETCHECK, 0, 0) == BST_CHECKED);
+    ua->continue_on_fail = (g_hContinueFail &&
+                            SendMessageW(g_hContinueFail, BM_GETCHECK, 0, 0) == BST_CHECKED);
     ua->batch_size = ReadBatchSizeFromUi();
-    if (ua->dev.d_type == DEVICE_PANEL_TYPE && ua->batch_size > PANEL_MAX_BATCH_SIZE) {
-        ua->batch_size = PANEL_MAX_BATCH_SIZE;
+    if (ua->dev.d_type == DEVICE_PANEL_TYPE) {
+        uint32_t raw = ua->batch_size;
+        ua->batch_size = ClampPanelBatchSize(raw);
+        SnapBatchUiForPanel();
+        if (raw != ua->batch_size) {
+            Logf(L"Панель: пачка %u → %u (1 либо кратно %u, макс %u).\r\n",
+                 raw, ua->batch_size, PANEL_CHUNK_WORDS, PANEL_MAX_BATCH_SIZE);
+        }
     }
     InterlockedExchange(&g_updateStop, 0);
     InterlockedExchange(&g_updateRunning, 1);
     EnableWindow(g_hStart, FALSE);
     EnableWindow(g_hStop, TRUE);
     if (g_hVerify) EnableWindow(g_hVerify, FALSE);
+    if (g_hContinueFail) EnableWindow(g_hContinueFail, FALSE);
     SetBatchUiEnabled(FALSE);
     g_hUpdaterThread = CreateThread(NULL, 0, UpdaterThreadProc, ua, 0, NULL);
 }
@@ -2270,7 +2645,7 @@ static const FwCollectEntry g_fw_collect[] = {
     { L"MKU_KR", L"MCU_kr_v095", L"Core\\Src\\upd.cpp", "APP_VERSION_U32", 1 },
     { L"PPKU1", L"stm_PPKY", L"Core\\Src\\main.c", "APP_VERSION_U32", 1 },
     { L"PPKU2", L"stm_PPKY_V2", L"Core\\Src\\main.c", "APP_VERSION_U32", 1 },
-    { L"Panel", L"stm_ControlBoard_v1", L"Core\\Inc\\panel_app.h", "PANEL_APP_VERSION_U32", 1 },
+    { L"Panel", L"stm_ControlBoard_v1", L"Core\\Src\\upd.cpp", "APP_VERSION_U32", 1 },
     { L"MCU_bootloader", L"MCU_bootloader", L"Core\\Inc\\boot_app.h", "BOOTLOADER_VERSION_U32", 0 },
     { L"PPKU_bootloader", L"stm_PPKY_Bootloader", L"Core\\Inc\\boot_layout.h", "BOOTLOADER_VERSION_U32", 0 },
     { L"Panel_bootloader", L"MCU_bootloader_v2", L"Core\\Inc\\boot_app.h", "BOOTLOADER_VERSION_U32", 0 },
@@ -2504,6 +2879,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             g_hBatch = CreateWindowW(L"EDIT", L"8",
                                      WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | ES_CENTER,
                                      570, 264, 50, 24, hwnd, (HMENU)IDC_EDIT_BATCH, NULL, NULL);
+            g_hContinueFail = CreateWindowW(L"BUTTON", L"Продолжать после неудачи",
+                                            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                                            635, 264, 210, 28, hwnd,
+                                            (HMENU)IDC_CHK_CONTINUE_FAIL, NULL, NULL);
 
             g_hProgress = CreateWindowW(PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE, 10, 298, w - 20, 20, hwnd, (HMENU)IDC_PROGRESS, NULL, NULL);
             g_hLog = CreateWindowW(L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_MULTILINE | ES_READONLY | WS_VSCROLL,
@@ -2533,6 +2912,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_COMMAND: {
             if (HIWORD(wp) == CBN_SELCHANGE && LOWORD(wp) == IDC_COMBO_MODE) {
                 UpdateTransportUi();
+                break;
+            }
+            /* Панель: пачка 1 или 4/8/12/16 — подгоняем при уходе с поля. */
+            if (LOWORD(wp) == IDC_EDIT_BATCH && HIWORD(wp) == EN_KILLFOCUS &&
+                g_selectedTargetValid &&
+                g_selectedTargetDev.d_type == DEVICE_PANEL_TYPE &&
+                !InterlockedCompareExchange(&g_updateRunning, 0, 0)) {
+                SnapBatchUiForPanel();
                 break;
             }
             switch (LOWORD(wp)) {
@@ -2679,7 +3066,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             }
             CanIdFields f = ParseCanId(pp->can_id);
             if (f.dir == 1) {
-                if (IsUpdatableType(f.d_type)) {
+                if (IsCanDiscoverableType(f.d_type)) {
                     DeviceInfo d = {0};
                     d.d_type = f.d_type;
                     d.h_adr = f.h_adr;
@@ -2742,6 +3129,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             EnableWindow(g_hStart, TRUE);
             EnableWindow(g_hStop, FALSE);
             if (g_hVerify) EnableWindow(g_hVerify, TRUE);
+            if (g_hContinueFail) EnableWindow(g_hContinueFail, TRUE);
             SetBatchUiEnabled(TRUE);
             /* После update_transmit устройство перезагружается — сброс кэша и повторный опрос. */
             if (g_activeUpdateDevValid) {

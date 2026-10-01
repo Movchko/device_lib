@@ -190,7 +190,7 @@ uid2            u32     LE
 ```
 fw_ver          u16     версия прошивки панели
 hw_id           u16     идентификатор платы (зашит в прошивку)
-ui_profile      u8      базовый UI-профиль (0=гориз., 1=верт., 2=другой дисплей)
+ui_profile      u8      тип панели: 1=большая, 2=малая гориз. (default), 3=малая верт. (OLED A0/C0)
 orientation     u8      текущая ориентация (0=гориз., 1=верт.)
 disp_w          u16     ширина дисплея, px
 disp_h          u16     высота дисплея, px
@@ -228,7 +228,7 @@ payload зависит от sub:
 | `0x03` | `led_enable u16` | Битовая маска по RsLedType; Flash |
 | `0x04` | `journal_lines u8` | Пересчёт вместимости журнала; Flash |
 | `0x05` | `rs_addr u8` | Смена RS-адреса панели (1..0xFE); Flash. Ответ CAPS на **старом** addr, далее панель слушает новый |
-| `0x06` | `panel_type u8` | Тип панели: `0`=малая (по умолчанию), `1`=большая; Flash + `CAPS.ui_profile`. Авто: нажатие ПУСК ОБЩИЙ при типе 0 → тип 1 |
+| `0x06` | `panel_type u8` | Тип панели: `1`=большая, `2`=малая гориз. (default), `3`=малая вертик. (OLED A0/C0); Flash + `CAPS.ui_profile`. Авто: нажатие ПУСК ОБЩИЙ при типе 2/3 → тип 1 |
 | `0x0F` | — | Сброс к заводскому конфигу (addr=1 и профиль) + Flash |
 
 Панель отвечает `RSP_CAPS` (обновлённый) или `RSP_ACK`. Локальный конфиг панели — `DevicePanelConfig` в Flash (`device_config.h`), сектор `0x0807E000`. ППКУ 2 может дополнительно хранить оверрайд в `PanelConfig`.
@@ -459,12 +459,15 @@ payload  ...
 
 ```
 active       u8     bit0 = пожар активен
-mode         u8     0=idle, 1=ДО ПУСКА, 2=ТУШЕНИЕ, 3=ТУШ.ВЫП., 4=ПОЖАР/ОСТ.,
-                    5=ПАУЗА, 6=ПОЖАР1, 7=ТУШ.ОШ.
-remaining_s  u8     секунды до автопуска
-sel_index    u8     выбранная зона (навигация UP/DOWN)
+mode         u8     режим выбранной зоны (sel_index): 0=idle, 1=ДО ПУСКА, 2=ТУШЕНИЕ,
+                    3=ТУШ.ВЫП., 4=ПОЖАР/ОСТ., 5=ПАУЗА, 6=ПОЖАР1, 7=ТУШ.ОШ.,
+                    8=ПУСК ЗАБЛ., 9=ТУШ.ОСТ.
+remaining_s  u8     секунды выбранной зоны
+sel_index    u8     индекс зоны в списке (навигация UP/DOWN на панели)
 n_zones      u8
-zones[]      n_zones × (len u8 + utf8[len])   len ≤ 32
+zones[]      n_zones × (len u8 + utf8[len] + z_mode u8 + z_remaining u8)
+             z_mode / z_remaining — состояние этой зоны (эталон ППКУ1: у каждой
+             зоны свой режим). Старые кадры без двух байт: панель берёт mode/remaining_s.
 ```
 
 #### MAIN_WARN (0x02)
@@ -548,6 +551,7 @@ wifi_block    u8   из PPKYConfig.wifi_block
 | `0x03` | `UI_EVT_BACK` | — | — |
 | `0x04` | `UI_EVT_MENU_SELECT` | index пункта | — |
 | `0x05` | `UI_EVT_JOURNAL_OPEN` | rec_idx | — |
+| `0x06` | `UI_EVT_FIRE_SELECT` | enabled (0/1) | selected_ui_index |
 
 ---
 

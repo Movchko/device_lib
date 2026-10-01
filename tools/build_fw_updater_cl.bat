@@ -23,8 +23,11 @@ if errorlevel 1 (
     )
 
     if not defined VCVARS_BAT (
-        for %%V in (2022 2019) do (
+        for %%V in (18 2022 2019) do (
             for %%E in (BuildTools Community Professional Enterprise) do (
+                if not defined VCVARS_BAT if exist "D:\program\Microsoft Visual Studio\%%V\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+                    set "VCVARS_BAT=D:\program\Microsoft Visual Studio\%%V\%%E\VC\Auxiliary\Build\vcvars64.bat"
+                )
                 if not defined VCVARS_BAT if exist "%ProgramFiles%\Microsoft Visual Studio\%%V\%%E\VC\Auxiliary\Build\vcvars64.bat" (
                     set "VCVARS_BAT=%ProgramFiles%\Microsoft Visual Studio\%%V\%%E\VC\Auxiliary\Build\vcvars64.bat"
                 )

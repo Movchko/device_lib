@@ -240,14 +240,24 @@ typedef struct DeviceLimitSwitchConfig {
 #define PANEL_CFG_HEADER_MAGIC   0x504E4C32u /* 'P','N','L','2' — v2 с UID/assign */
 #define PANEL_CFG_FORMAT_VERSION 2u
 
-/* Тип корпуса панели (DevicePanelConfig.panel_type / PROFILE_SET 0x06). */
-#define PANEL_TYPE_SMALL 0u /* по умолчанию: нет ПУСК ОБЩИЙ; долгий ПУСК СП → общий пуск */
-#define PANEL_TYPE_BIG   1u /* есть ПУСК ОБЩИЙ, NORM/ERR */
+/* Тип панели (DevicePanelConfig.panel_type / PROFILE_SET 0x06 / CAPS.ui_profile). */
+#define PANEL_TYPE_1       1u /* большая (есть ПУСК ОБЩИЙ, NORM/ERR) */
+#define PANEL_TYPE_2       2u /* маленькая горизонтальная (по умолчанию) */
+#define PANEL_TYPE_3       3u /* маленькая вертикальная (OLED remap A0/C0) */
+#define PANEL_TYPE_DEFAULT PANEL_TYPE_2
+/* Совместимость со старыми именами в коде. */
+#define PANEL_TYPE_BIG     PANEL_TYPE_1
+#define PANEL_TYPE_SMALL   PANEL_TYPE_2
+#define PANEL_TYPE_IS_SMALL(t) (((uint8_t)(t) == PANEL_TYPE_2) || ((uint8_t)(t) == PANEL_TYPE_3) || ((uint8_t)(t) == 0u))
+#define PANEL_TYPE_IS_BIG(t)   ((uint8_t)(t) == PANEL_TYPE_1)
+#define PANEL_TYPE_NORMALIZE(t) \
+	((((uint8_t)(t) == PANEL_TYPE_1) || ((uint8_t)(t) == PANEL_TYPE_2) || ((uint8_t)(t) == PANEL_TYPE_3)) \
+		? (uint8_t)(t) : PANEL_TYPE_DEFAULT)
 
 typedef struct DevicePanelConfig {
 	/* RS-адрес на шине: 0x01..0xFE. По умолчанию 0x01. */
 	uint8_t rs_addr;
-	/* Ориентация UI: 0=гориз., 1=верт. */
+	/* Ориентация UI: 0=гориз., 1=верт. (TouchGFX; OLED remap — от panel_type). */
 	uint8_t orientation;
 	/* Число строк журнала на экране (1..N). */
 	uint8_t journal_lines;
@@ -263,7 +273,7 @@ typedef struct DevicePanelConfig {
 	uint32_t uid0;
 	uint32_t uid1;
 	uint32_t uid2;
-	/* Тип панели: PANEL_TYPE_SMALL / PANEL_TYPE_BIG. */
+	/* Тип панели: PANEL_TYPE_1 / PANEL_TYPE_2 / PANEL_TYPE_3. */
 	uint8_t panel_type;
 	/* резерв до VDEVICE_CFG_SIZE (64 байта): 1+1+1+1+2+1+1+12+1 = 21 */
 	uint8_t reserved[VDEVICE_CFG_SIZE - 21];

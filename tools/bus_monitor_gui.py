@@ -133,8 +133,9 @@ from ppky_log_stream import (
     RS_PANEL_RSP_ACTIVITY,
     RS_PANEL_CMD_PROFILE_SET,
     RS_PANEL_PROFILE_SET_PANEL_TYPE,
-    PANEL_TYPE_BIG,
-    PANEL_TYPE_SMALL,
+    PANEL_TYPE_1,
+    PANEL_TYPE_2,
+    PANEL_TYPE_3,
     RS_PANEL_CMD_PPKY_WIFI_ENABLE,
     RS_PANEL_CMD_PPKY_CAN_MIRROR_SET,
     RS_PANEL_CMD_CAN_MIRROR,
@@ -238,7 +239,7 @@ class BusMonitorGUI:
         self._ppky_rs_can_bridge = False
         self._rs_tx_seq = 1
         self._last_panel_rs_addr: int | None = None
-        self.panel_type_var = StringVar(value="малая")
+        self.panel_type_var = StringVar(value="тип2")
         self.panel_rs_addr_var = StringVar(value="1")
 
         self.can_id_req: int | None = None
@@ -397,7 +398,7 @@ class BusMonitorGUI:
         self.panel_type_combo = ttk.Combobox(
             conn_frame,
             textvariable=self.panel_type_var,
-            values=("малая", "большая"),
+            values=("тип1", "тип2", "тип3"),
             state="readonly",
             width=8,
         )
@@ -2070,7 +2071,7 @@ class BusMonitorGUI:
         return sorted(found.keys())
 
     def _apply_mku_defaults_all(self):
-        """Записать DefaultConfig() прошивки во все МКУ (сохраняется только UId)."""
+        """Команда FactoryReset (169) всем активным МКУ по очереди: стереть Flash и перезагрузка."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
@@ -2086,7 +2087,12 @@ class BusMonitorGUI:
             f"{DEVICE_NAMES.get(dt, f't{dt}')} h={h} l={l} z={z}"
             for dt, h, l, z in mku_list
         )
-        self.msg_queue.put({"log": f"[*] Дефолты МКУ: {len(mku_list)} шт. → {names}"})
+        self.msg_queue.put({
+            "log": (
+                f"[*] Дефолты МКУ: команда FactoryReset (169), {len(mku_list)} шт. по очереди → {names}. "
+                "МКУ стирает Flash конфига, шлёт ACK и перезагружается; адрес после старта — из UID чипа."
+            )
+        })
         self.connect_btn.config(state=DISABLED)
 
         def progress_cb(i: int, total: int, mku: tuple[int, int, int, int]):
@@ -2189,7 +2195,7 @@ class BusMonitorGUI:
             )
 
     def _send_panel_type(self):
-        """PROFILE_SET 0x06: тип панели (большая/малая) → Flash панели."""
+        """PROFILE_SET 0x06: тип панели 1/2/3 → Flash панели."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
@@ -2201,13 +2207,16 @@ class BusMonitorGUI:
         if addr < 1 or addr > 0xFE:
             self.msg_queue.put({"log": "[!] RS-адрес панели: 1..0xFE"})
             return
-        size_txt = (self.panel_type_var.get() or "").strip().lower()
-        if size_txt.startswith("мал"):
-            size = PANEL_TYPE_SMALL
-            size_label = "малая"
+        size_txt = (self.panel_type_var.get() or "").strip().lower().replace(" ", "")
+        if "1" in size_txt or size_txt.startswith("бол"):
+            size = PANEL_TYPE_1
+            size_label = "тип1 (большая)"
+        elif "3" in size_txt:
+            size = PANEL_TYPE_3
+            size_label = "тип3 (малая верт.)"
         else:
-            size = PANEL_TYPE_BIG
-            size_label = "большая"
+            size = PANEL_TYPE_2
+            size_label = "тип2 (малая гориз.)"
         seq = self._rs_tx_seq & 0xFF
         self._rs_tx_seq = (self._rs_tx_seq + 1) & 0xFF or 1
         rs = encode_rs_bus_frame(
@@ -2220,15 +2229,16 @@ class BusMonitorGUI:
         if not rs:
             return
         pkt = build_bsu_esp_uart_packet(rs)
-        if self._write_packet(pkt, f"Panel PROFILE_SET size={size_label}"):
+        if self._write_packet(pkt, f"Panel PROFILE_SET type={size_label}"):
             self.msg_queue.put(
                 {
                     "log": (
-                        f">> Панель addr={addr}: тип={size_label} "
+                        f">> Панель addr={addr}: {size_label} "
                         f"(PROFILE_SET 0x06={size}) frame=[{rs.hex()}]"
                     )
                 }
             )
+
 
     def _send_mcu_tc_fire(self):
         """Имитация «ПОЖАР» от МКУ_ТС: h_adr в CAN всегда 1; зона — индекс зоны как в конфиге ППКУ (0…).

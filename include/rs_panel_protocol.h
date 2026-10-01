@@ -51,6 +51,8 @@ typedef enum {
     /* Команды обновления прошивки панели (совпадают с ServiceCmd МКУ).
      * Unicast на адрес панели; тип в ACTIVITY = DEVICE_PANEL_BOOTLOADER_TYPE. */
     RS_PANEL_CMD_BOOT_RESET_MCU      = 128u,
+    /* SET_UPDATE: payload = idx_be24 + N×word_be32 (N=1..15). ACK — то же эхо.
+     * N=4 (один flash quad) — рекомендуемый размер кадра. N=1 — совместимость. */
     RS_PANEL_CMD_BOOT_SET_UPD_WORD = 156u,
     RS_PANEL_CMD_BOOT_UPD_TRANSMIT = 158u,
     RS_PANEL_CMD_BOOT_GET_VERSION    = 159u,
@@ -178,7 +180,9 @@ typedef enum {
     RS_PANEL_UI_EVT_CONFIRM = 0x02u,
     RS_PANEL_UI_EVT_BACK = 0x03u,
     RS_PANEL_UI_EVT_MENU_SELECT = 0x04u,
-    RS_PANEL_UI_EVT_JOURNAL_OPEN = 0x05u
+    RS_PANEL_UI_EVT_JOURNAL_OPEN = 0x05u,
+    /* Главный экран: выбранная зона пожара (как Fire_UiSetManualSelection на ППКУ1). */
+    RS_PANEL_UI_EVT_FIRE_SELECT = 0x06u
 } RsUiEventType;
 
 typedef enum {
@@ -188,7 +192,7 @@ typedef enum {
     RS_PANEL_PROFILE_SET_JOURNAL_LINES = 0x04u,
     /* Смена RS-адреса панели на шине (1..0xFE); сохраняется во Flash. */
     RS_PANEL_PROFILE_SET_RS_ADDR = 0x05u,
-    /* Тип панели: PANEL_TYPE_SMALL(0) / PANEL_TYPE_BIG(1); Flash + CAPS.ui_profile. */
+    /* Тип панели: PANEL_TYPE_1/2/3; Flash + CAPS.ui_profile. */
     RS_PANEL_PROFILE_SET_PANEL_TYPE = 0x06u,
     RS_PANEL_PROFILE_SET_FACTORY_RESET = 0x0Fu
 } RsProfileSetSub;
@@ -311,7 +315,7 @@ typedef struct {
         uint16_t led_enable;
         uint8_t journal_lines;
         uint8_t rs_addr; /* PROFILE_SET_RS_ADDR: 0x01..0xFE */
-        uint8_t panel_type; /* PROFILE_SET_PANEL_TYPE: PANEL_TYPE_SMALL/BIG */
+        uint8_t panel_type; /* PROFILE_SET_PANEL_TYPE: PANEL_TYPE_1/2/3 */
     } value;
 } RsPanelProfileSetCmd;
 

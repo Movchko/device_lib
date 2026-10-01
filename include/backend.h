@@ -101,6 +101,10 @@ enum ServiceCmd {
 	/* ППКУ → ПК: APPLY конфигов на МКУ завершён успешно (после ConfigSync APPLY). */
 	ServiceCmd_ApplyConfigDone	= 168,
 
+	/* Стереть Flash конфига и перезагрузить устройство.
+	 * После старта пустой сектор: DefaultConfig() + SaveConfig(). */
+	ServiceCmd_FactoryReset		= 169,
+
 	ServiceCmd_CircSetAdr 		= 200,
 };
 
@@ -206,6 +210,9 @@ void SetConfigWord(uint16_t num, uint32_t word); // set 4 bytes
 void SaveConfig();
 void ResetConfig();
 void AplyConfig();
+/* 1 — область конфига во Flash стёрта, 0 — не поддержано или стирание не удалось.
+ * Weak-заглушка в backend.c; прошивки МКУ переопределяют. */
+uint8_t FactoryResetConfig(void);
 
 /* Хост начал/продолжает загрузку конфига на ППКУ (bus: BUS_UART1=WiFi и т.п.). */
 __attribute__((weak)) void App_OnHostConfigCommand(uint8_t bus, uint8_t command);

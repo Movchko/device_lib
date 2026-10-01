@@ -63,6 +63,7 @@ __attribute__((weak)) void USBSendData(uint8_t *Buf);
 __attribute__((weak)) void UARTSendData(uint8_t *Buf);
 __attribute__((weak)) void ResetConfig();
 __attribute__((weak)) void AplyConfig();
+__attribute__((weak)) uint8_t FactoryResetConfig(void) { return 0u; }
 __attribute__((weak)) void App_OnHostConfigCommand(uint8_t bus, uint8_t command) { (void)bus; (void)command; }
 /* Вызывается при переполнении очереди отправки; в приложении можно переопределить */
 __attribute__((weak)) void CanSendOverError(void) { (void)0; }
@@ -524,6 +525,16 @@ void ConfigServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t re
 			DefaultConfig();
 			SendMessage(Dev, Command, Data, SEND_NOW, reply_bus);
 		}break;
+		case ServiceCmd_FactoryReset: {
+			/* Стирание до ACK: при ошибке ответа нет.
+			 * ACK уходит по текущему адресу, затем ResetMCU (отложенный NVIC_SystemReset).
+			 * На старте пустой сектор даёт DefaultConfig() + SaveConfig(). */
+			if (FactoryResetConfig() == 0u) {
+				break;
+			}
+			SendMessage(Dev, Command, Data, SEND_NOW, reply_bus);
+			ResetMCU();
+		}break;
 	}
 }
 
@@ -558,7 +569,14 @@ static void UpdateServiceCmd(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uin
 			}
 		}break;
 		case ServiceCmd_UpdateTransmit: {
-			(void)FinishUpdateTransmit();
+			uint8_t st = FinishUpdateTransmit();
+			/* При успехе FinishUpdateTransmit делает reset и сюда не возвращается.
+			 * При ошибке (CRC UPDATE) — NACK status=0, без reset. */
+			{
+				uint8_t Data[7] = {0, 0, 0, 0, 0, 0, 0};
+				Data[0] = st;
+				SendMessage(Dev, Command, Data, SEND_NOW, reply_bus);
+			}
 		}break;
 	}
 }
@@ -619,7 +637,8 @@ void ServiceCommandParse(uint8_t Dev, uint8_t Command, uint8_t *MsgData, uint8_t
 		case ServiceCmd_SetConfigWord:
 		case ServiceCmd_SaveConfig:
 		case ServiceCmd_StartSetConfig:
-		case ServiceCmd_DefaultConfig: {
+		case ServiceCmd_DefaultConfig:
+		case ServiceCmd_FactoryReset: {
 			if(dir & (Dev == 0)) // если от нас и нам, то исключаем (кольцо)
 				return;
 			else
