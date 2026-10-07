@@ -7,8 +7,8 @@
 #define BURN_PHASE_WAIT      2
 #define BURN_PHASE_CHECK     3
 
-#define BURN_RAMP_MS         200
-#define BURN_HOLD_MS         800
+#define BURN_RAMP_MS         10
+#define BURN_HOLD_MS         20
 #define BURN_WAIT_MS         50   /* пауза перед проверкой после сброса ШИМ */
 
 #define IGNITER_DEB_MS		300
