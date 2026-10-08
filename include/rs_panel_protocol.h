@@ -155,6 +155,9 @@ typedef enum {
     RS_PANEL_SCREEN_MENU_CONNECTION = 0x0017u,
     RS_PANEL_SCREEN_MENU_SOUND = 0x0018u,
     RS_PANEL_SCREEN_MENU_BLOCK_ZONE = 0x0019u,
+    /* Локальные экраны теста панели (навигация без UI_NAV с хоста). */
+    RS_PANEL_SCREEN_MENU_TEST_SELECT = 0x001Au,
+    RS_PANEL_SCREEN_MENU_TEST_LAMPS = 0x001Bu,
     RS_PANEL_SCREEN_BLANK = 0x00FFu
 } RsUiScreenId;
 
