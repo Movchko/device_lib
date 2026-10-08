@@ -69,8 +69,9 @@ extern "C" {
 #define RS_PANEL_V3_SYS_TIME_VALID          (1u << 4)
 
 #define RS_PANEL_V3_SYS_POWER_INPUT_FAULT   (1u << 5)
-
-
+/* Звук: ППКУ — источник истины для панелей (POLL SYS). */
+#define RS_PANEL_V3_SYS_SOUND_ON            (1u << 6)
+#define RS_PANEL_V3_SYS_SOUND_BLOCKED       (1u << 7)
 
 #define RS_PANEL_V3_RSP_FLAG_NEED_CATALOG   (1u << 0)
 

@@ -770,8 +770,12 @@ class BusMonitorGUI:
             kind = "app"
         else:
             kind = f"dev=0x{dev_type:02X}"
+        # hw_id в ACTIVITY = формфактор PANEL_TYPE_1/2/3 (см. panel_state / CAPS.ui_profile).
+        panel_ff = {1: "тип1/большая", 2: "тип2/малая-H", 3: "тип3/малая-V"}.get(
+            int(hw_id), f"тип={hw_id}"
+        )
         line = (
-            f"Панель addr={rs['addr']} {kind} fw={fw_ver} hw=0x{hw_id:04X} "
+            f"Панель addr={rs['addr']} {kind} {panel_ff} fw={fw_ver} "
             f"status=0x{status:02X} up={uptime}s"
         )
         key = (DEVICE_PANEL_TYPE, 0, rs["addr"], 0, -1)
