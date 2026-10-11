@@ -7,8 +7,8 @@
 #define BURN_PHASE_WAIT      2
 #define BURN_PHASE_CHECK     3
 
-#define BURN_RAMP_MS         10
-#define BURN_HOLD_MS         20
+#define BURN_RAMP_MS_DEFAULT 10
+#define BURN_HOLD_MS_DEFAULT 20
 #define BURN_WAIT_MS         50   /* пауза перед проверкой после сброса ШИМ */
 
 #define IGNITER_DEB_MS		300
@@ -22,6 +22,8 @@ VDeviceIgniter::VDeviceIgniter(uint8_t ChNum) : VDevice(ChNum) {
 	threshold_break_low = 1000;
 	threshold_break_high = 3000;
 	burn_retry_count = 1;
+	burn_ramp_ms = BURN_RAMP_MS_DEFAULT;
+	burn_hold_ms = BURN_HOLD_MS_DEFAULT;
 	run_elapsed_ms = 0;
 	pwm_value = 0;
 	measured_resistance_ohm = 0;
@@ -52,15 +54,22 @@ void VDeviceIgniter::Init() {
 	if (Config != nullptr) {
 		if (Config->threshold_break_low == 0)  Config->threshold_break_low  = 1000;
 		if (Config->threshold_break_high == 0) Config->threshold_break_high = 3000;
+		/* 0 в старом резерве и в незаполненном DefaultConfig — прежние константы. */
+		if (Config->burn_ramp_ms == 0) Config->burn_ramp_ms = BURN_RAMP_MS_DEFAULT;
+		if (Config->burn_hold_ms == 0) Config->burn_hold_ms = BURN_HOLD_MS_DEFAULT;
 		threshold_break_low  = Config->threshold_break_low;
 		threshold_break_high = Config->threshold_break_high;
 		burn_retry_count     = Config->burn_retry_count;
+		burn_ramp_ms         = Config->burn_ramp_ms;
+		burn_hold_ms         = Config->burn_hold_ms;
 		disable_sc_check     = Config->disable_sc_check ? 1 : 0;
 		block 				 = Config->block;
 	} else {
 		threshold_break_low   = 1000;
 		threshold_break_high  = 3000;
 		burn_retry_count      = 1;
+		burn_ramp_ms          = BURN_RAMP_MS_DEFAULT;
+		burn_hold_ms          = BURN_HOLD_MS_DEFAULT;
 		disable_sc_check      = 0;
 	}
 
@@ -243,6 +252,30 @@ void VDeviceIgniter::CommandCB(uint8_t Command, uint8_t *Parameters) {
 				}
 			}
 		} break;
+
+		/* cmd=13: времена прожига, мс, по 2 байта LE.
+		 * Parameters[0,1] = burn_ramp_ms
+		 * Parameters[2,3] = burn_hold_ms
+		 * 0 заменяется значением по умолчанию (10 / 20): так старый резерв
+		 * и явный ноль не дают деление на ноль в разгоне. */
+		case 13: {
+			if (Parameters != nullptr) {
+				uint16_t ramp = (uint16_t)Parameters[0] | ((uint16_t)Parameters[1] << 8);
+				uint16_t hold = (uint16_t)Parameters[2] | ((uint16_t)Parameters[3] << 8);
+				if (ramp == 0) ramp = BURN_RAMP_MS_DEFAULT;
+				if (hold == 0) hold = BURN_HOLD_MS_DEFAULT;
+
+				burn_ramp_ms = ramp;
+				burn_hold_ms = hold;
+				if (Config != nullptr) {
+					Config->burn_ramp_ms = ramp;
+					Config->burn_hold_ms = hold;
+				}
+				if (VDeviceSaveCfg != nullptr) {
+					VDeviceSaveCfg();
+				}
+			}
+		} break;
 	}
 }
 
@@ -275,7 +308,7 @@ void VDeviceIgniter::Timer1ms() {
 	Process();
 
 	if (State == DeviceIgniterState_Run) {
-		if (run_elapsed_ms < 0xFFFF) {
+		if (run_elapsed_ms < 0xFFFFFFFFu) {
 			run_elapsed_ms++;
 		}
 	}
@@ -322,20 +355,20 @@ void VDeviceIgniter::UpdatePwm() {
 
 	switch (burn_phase) {
 		case BURN_PHASE_RAMP: {
-			if (run_elapsed_ms < BURN_RAMP_MS) {
-				uint32_t val = (uint32_t)run_elapsed_ms * PWM_MAX;
-				val /= BURN_RAMP_MS;
-				if (val > PWM_MAX) val = PWM_MAX;
-				pwm_value = (uint16_t)val;
-			} else {
+			if (burn_ramp_ms == 0u || run_elapsed_ms >= burn_ramp_ms) {
 				pwm_value = PWM_MAX;
 				burn_phase = BURN_PHASE_HOLD;
+			} else {
+				uint32_t val = run_elapsed_ms * PWM_MAX;
+				val /= burn_ramp_ms;
+				if (val > PWM_MAX) val = PWM_MAX;
+				pwm_value = (uint16_t)val;
 			}
 		} break;
 
 		case BURN_PHASE_HOLD: {
 			pwm_value = PWM_MAX;
-			if (run_elapsed_ms >= BURN_RAMP_MS + BURN_HOLD_MS) {
+			if (run_elapsed_ms >= (uint32_t)burn_ramp_ms + (uint32_t)burn_hold_ms) {
 				pwm_value = 0;
 				burn_phase = BURN_PHASE_WAIT;
 				pwm_off_cooldown_ms = 100;  /* 100мс не доверять ADC после выключения ШИМ */
@@ -344,7 +377,7 @@ void VDeviceIgniter::UpdatePwm() {
 
 		case BURN_PHASE_WAIT: {
 			pwm_value = 0;
-			if (run_elapsed_ms >= BURN_RAMP_MS + BURN_HOLD_MS + BURN_WAIT_MS) {
+			if (run_elapsed_ms >= (uint32_t)burn_ramp_ms + (uint32_t)burn_hold_ms + (uint32_t)BURN_WAIT_MS) {
 				burn_phase = BURN_PHASE_CHECK;
 			}
 		} break;

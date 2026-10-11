@@ -132,6 +132,7 @@ from ppky_log_stream import (
     RS_BUS_BROADCAST_ADDR,
     RS_PANEL_RSP_ACTIVITY,
     RS_PANEL_CMD_PROFILE_SET,
+    RS_PANEL_PROFILE_SET_RS_ADDR,
     RS_PANEL_PROFILE_SET_PANEL_TYPE,
     PANEL_TYPE_1,
     PANEL_TYPE_2,
@@ -241,6 +242,7 @@ class BusMonitorGUI:
         self._last_panel_rs_addr: int | None = None
         self.panel_type_var = StringVar(value="тип2")
         self.panel_rs_addr_var = StringVar(value="1")
+        self.panel_new_rs_addr_var = StringVar(value="2")
 
         self.can_id_req: int | None = None
         self.can_id_rsp: int | None = None
@@ -260,6 +262,8 @@ class BusMonitorGUI:
         self.igniter_th_low_var = StringVar(value="1000")
         self.igniter_th_high_var = StringVar(value="3000")
         self.igniter_retry_var = StringVar(value="1")
+        self.igniter_ramp_var = StringVar(value="10")
+        self.igniter_hold_var = StringVar(value="20")
         self.igniter_start_all_module_delay_var = BooleanVar(value=False)
         self.igniter_status_var = StringVar(value="—")
         self.igniter_sc_check_enabled = True
@@ -393,18 +397,6 @@ class BusMonitorGUI:
         Button(conn_frame, text="CAN→RS вкл", command=lambda: self._send_ppky_can_mirror(1)).pack(side=LEFT, padx=(8, 0))
         Button(conn_frame, text="CAN→RS выкл", command=lambda: self._send_ppky_can_mirror(0)).pack(side=LEFT, padx=(4, 0))
 
-        Label(conn_frame, text="Панель:").pack(side=LEFT, padx=(12, 2))
-        Entry(conn_frame, textvariable=self.panel_rs_addr_var, width=3).pack(side=LEFT, padx=(0, 4))
-        self.panel_type_combo = ttk.Combobox(
-            conn_frame,
-            textvariable=self.panel_type_var,
-            values=("тип1", "тип2", "тип3"),
-            state="readonly",
-            width=8,
-        )
-        self.panel_type_combo.pack(side=LEFT, padx=(0, 4))
-        Button(conn_frame, text="Тип панели", command=self._send_panel_type).pack(side=LEFT, padx=(2, 0))
-
         # Тест: «ПОЖАР» как от МКУ_ТС (h_adr=1 фиксировано; зона — индекс зоны ППКУ, см. Fire_OnStatusFire)
         Label(conn_frame, text="Зона ППКУ:").pack(side=LEFT, padx=(12, 4))
         Entry(conn_frame, textvariable=self.mcu_tc_fire_zone_var, width=4).pack(side=LEFT, padx=(0, 6))
@@ -413,6 +405,24 @@ class BusMonitorGUI:
         self.connect_btn = Button(conn_frame, text="Подключить", command=self._toggle_connect)
         self.connect_btn.pack(side=LEFT, padx=(8, 0))
         Button(conn_frame, text="ЛОГИ", command=self._open_ppky_log_window).pack(side=LEFT, padx=(8, 0))
+
+        # --- Панель (RS PROFILE_SET) ---
+        panel_frame = Frame(main)
+        panel_frame.pack(fill=X, pady=(0, 8))
+        Label(panel_frame, text="Панель:").pack(side=LEFT, padx=(0, 2))
+        Entry(panel_frame, textvariable=self.panel_rs_addr_var, width=3).pack(side=LEFT, padx=(0, 8))
+        self.panel_type_combo = ttk.Combobox(
+            panel_frame,
+            textvariable=self.panel_type_var,
+            values=("тип1", "тип2", "тип3"),
+            state="readonly",
+            width=8,
+        )
+        self.panel_type_combo.pack(side=LEFT, padx=(0, 4))
+        Button(panel_frame, text="Тип панели", command=self._send_panel_type).pack(side=LEFT, padx=(2, 8))
+        Label(panel_frame, text="Новый addr:").pack(side=LEFT, padx=(0, 2))
+        Entry(panel_frame, textvariable=self.panel_new_rs_addr_var, width=3).pack(side=LEFT, padx=(0, 4))
+        Button(panel_frame, text="Сменить адрес", command=self._send_panel_rs_addr).pack(side=LEFT, padx=(2, 0))
 
         # --- Кнопки команд ---
         cmd_frame = Frame(main)
@@ -481,6 +491,11 @@ class BusMonitorGUI:
         Label(igniter_frame, text="retry").pack(side=LEFT, padx=(0, 2))
         Entry(igniter_frame, textvariable=self.igniter_retry_var, width=2).pack(side=LEFT, padx=(0, 6))
         Button(igniter_frame, text="Пороги (cmd=12)", command=self._send_igniter_thresholds).pack(side=LEFT, padx=(2, 0))
+        Label(igniter_frame, text="ramp").pack(side=LEFT, padx=(12, 2))
+        Entry(igniter_frame, textvariable=self.igniter_ramp_var, width=5).pack(side=LEFT, padx=(0, 4))
+        Label(igniter_frame, text="hold").pack(side=LEFT, padx=(0, 2))
+        Entry(igniter_frame, textvariable=self.igniter_hold_var, width=5).pack(side=LEFT, padx=(0, 4))
+        Button(igniter_frame, text="Время (cmd=13)", command=self._send_igniter_burn_times).pack(side=LEFT, padx=(2, 0))
         Label(igniter_frame, text="Статус:").pack(side=LEFT, padx=(16, 4))
         self.igniter_status_label = Label(igniter_frame, textvariable=self.igniter_status_var, fg="gray")
         self.igniter_status_label.pack(side=LEFT)
@@ -1554,6 +1569,64 @@ class BusMonitorGUI:
                 "log": f">> Спичка (h={h}, l={l}, zone={zone}) пороги low={low} high={high} retry={retry} (cmd=12)"
             })
 
+    def _send_igniter_burn_times(self):
+        """Задать времена прожига спички (cmd=13): ramp/hold, мс, LE, по 2 байта.
+
+        0 на стороне МКУ заменяется дефолтом (ramp=10, hold=20).
+        """
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        try:
+            h = int(self.igniter_h_var.get() or "1")
+            l = int(self.igniter_l_var.get() or "1")
+            ramp = int(self.igniter_ramp_var.get() or "0")
+            hold = int(self.igniter_hold_var.get() or "0")
+        except ValueError:
+            self.msg_queue.put({"log": "[!] Неверные поля спички (h/l/ramp/hold)"})
+            return
+
+        if h < 0 or h > 255 or l < 0 or l > 63:
+            self.msg_queue.put({"log": "[!] Неверный адрес спички: h=0..255, l=0..63"})
+            return
+        if ramp < 0 or ramp > 65535 or hold < 0 or hold > 65535:
+            self.msg_queue.put({"log": "[!] ramp и hold должны быть в диапазоне 0..65535"})
+            return
+
+        zone = self._find_active_device_zone_exact(11, h, l)
+        used_fallback = False
+        if zone is None:
+            zone = 0
+            used_fallback = True
+
+        can_id = build_can_id(11, h, l, zone, 0)
+        data = bytes([
+            13,
+            ramp & 0xFF,
+            (ramp >> 8) & 0xFF,
+            hold & 0xFF,
+            (hold >> 8) & 0xFF,
+            0,
+            0,
+            0,
+        ])
+        pkt = build_bsu_can_packet(can_id, data)
+        if not self._write_packet(pkt, "IgniterSetBurnTimes"):
+            return
+
+        note = ""
+        if ramp == 0 or hold == 0:
+            note = " (0 на МКУ станет ramp=10 / hold=20)"
+        if used_fallback:
+            self.msg_queue.put({
+                "log": f">> Спичка (h={h}, l={l}) ramp={ramp} hold={hold} мс, "
+                       f"zone=0 (fallback: нет свежего статуса) (cmd=13){note}"
+            })
+        else:
+            self.msg_queue.put({
+                "log": f">> Спичка (h={h}, l={l}, zone={zone}) ramp={ramp} hold={hold} мс (cmd=13){note}"
+            })
+
     def _send_relay_set(self, state: int):
         """Отправить команду реле cmd=10 с параметром state (0/1)."""
         if not self.ser or not self.ser.is_open:
@@ -2198,18 +2271,24 @@ class BusMonitorGUI:
                 }
             )
 
+    def _parse_panel_rs_addr(self, text: str, label: str) -> int | None:
+        try:
+            addr = int((text or "").strip(), 0)
+        except ValueError:
+            self.msg_queue.put({"log": f"[!] Некорректный {label}"})
+            return None
+        if addr < 1 or addr > 0xFE:
+            self.msg_queue.put({"log": f"[!] {label}: 1..0xFE"})
+            return None
+        return addr
+
     def _send_panel_type(self):
         """PROFILE_SET 0x06: тип панели 1/2/3 → Flash панели."""
         if not self.ser or not self.ser.is_open:
             self.msg_queue.put({"log": "[!] Не подключено"})
             return
-        try:
-            addr = int((self.panel_rs_addr_var.get() or "1").strip(), 0)
-        except ValueError:
-            self.msg_queue.put({"log": "[!] Некорректный RS-адрес панели"})
-            return
-        if addr < 1 or addr > 0xFE:
-            self.msg_queue.put({"log": "[!] RS-адрес панели: 1..0xFE"})
+        addr = self._parse_panel_rs_addr(self.panel_rs_addr_var.get(), "RS-адрес панели")
+        if addr is None:
             return
         size_txt = (self.panel_type_var.get() or "").strip().lower().replace(" ", "")
         if "1" in size_txt or size_txt.startswith("бол"):
@@ -2243,6 +2322,44 @@ class BusMonitorGUI:
                 }
             )
 
+    def _send_panel_rs_addr(self):
+        """PROFILE_SET 0x05: смена RS-адреса панели → Flash; CAPS на старом addr."""
+        if not self.ser or not self.ser.is_open:
+            self.msg_queue.put({"log": "[!] Не подключено"})
+            return
+        addr = self._parse_panel_rs_addr(self.panel_rs_addr_var.get(), "RS-адрес панели")
+        if addr is None:
+            return
+        new_addr = self._parse_panel_rs_addr(
+            self.panel_new_rs_addr_var.get(), "новый RS-адрес панели"
+        )
+        if new_addr is None:
+            return
+        if new_addr == addr:
+            self.msg_queue.put({"log": "[!] Новый адрес совпадает с текущим"})
+            return
+        seq = self._rs_tx_seq & 0xFF
+        self._rs_tx_seq = (self._rs_tx_seq + 1) & 0xFF or 1
+        rs = encode_rs_bus_frame(
+            addr,
+            seq,
+            0,
+            RS_PANEL_CMD_PROFILE_SET,
+            bytes([RS_PANEL_PROFILE_SET_RS_ADDR, new_addr]),
+        )
+        if not rs:
+            return
+        pkt = build_bsu_esp_uart_packet(rs)
+        if self._write_packet(pkt, f"Panel PROFILE_SET rs_addr={new_addr}"):
+            self.panel_rs_addr_var.set(str(new_addr))
+            self.msg_queue.put(
+                {
+                    "log": (
+                        f">> Панель addr={addr}→{new_addr} "
+                        f"(PROFILE_SET 0x05={new_addr}) frame=[{rs.hex()}]"
+                    )
+                }
+            )
 
     def _send_mcu_tc_fire(self):
         """Имитация «ПОЖАР» от МКУ_ТС: h_adr в CAN всегда 1; зона — индекс зоны как в конфиге ППКУ (0…).

@@ -135,6 +135,12 @@ uint16_t RsPanelV3_FaultEvtEncodeBody(uint8_t *dst, uint16_t dst_size,
         dst[pos++] = (uint8_t)((uint16_t)item->extra & 0xFFu);
         dst[pos++] = (uint8_t)(((uint16_t)item->extra >> 8) & 0xFFu);
     }
+    if ((item->flags & RS_PANEL_V3_FAULT_FLAG_HAS_ZONE) != 0u) {
+        if (pos >= dst_size) {
+            return 0u;
+        }
+        dst[pos++] = item->zone;
+    }
     if (item->code == (uint8_t)RS_PANEL_V3_FAULT_PANEL_JOURNAL) {
         if (pos >= dst_size) {
             return 0u;
@@ -190,6 +196,12 @@ uint8_t RsPanelV3_FaultEvtDecodeBody(const uint8_t *src, uint16_t len,
         out->extra = (int16_t)((uint16_t)src[pos] | ((uint16_t)src[pos + 1u] << 8));
         pos = (uint16_t)(pos + 2u);
     }
+    if ((out->flags & RS_PANEL_V3_FAULT_FLAG_HAS_ZONE) != 0u) {
+        if (pos >= len) {
+            return 0u;
+        }
+        out->zone = src[pos++];
+    }
     if (out->code == (uint8_t)RS_PANEL_V3_FAULT_PANEL_JOURNAL && pos < len) {
         out->panel_addr = src[pos++];
     }
@@ -220,6 +232,9 @@ uint8_t RsPanelV3_FaultEvtEqual(const RsPanelV3FaultEvtItem *a, const RsPanelV3F
         return 0u;
     }
     if ((a->flags & RS_PANEL_V3_FAULT_FLAG_HAS_EXTRA) != 0u && a->extra != b->extra) {
+        return 0u;
+    }
+    if ((a->flags & RS_PANEL_V3_FAULT_FLAG_HAS_ZONE) != 0u && a->zone != b->zone) {
         return 0u;
     }
     if (a->code == (uint8_t)RS_PANEL_V3_FAULT_PANEL_JOURNAL &&
@@ -840,7 +855,8 @@ uint8_t RsPanelV3_DecodePoll(const uint8_t *src, uint16_t src_len, RsPanelV3Poll
 uint16_t RsPanelV3_EncodeRsp(uint8_t *dst, uint16_t dst_size, const RsPanelV3Rsp *rsp)
 {
     uint16_t pos = 0u;
-    if (dst == 0 || rsp == 0 || dst_size < 12u) {
+    /* ver + event(8) + zones_crc + devices_crc + faults_crc + flags = 16 */
+    if (dst == 0 || rsp == 0 || dst_size < 16u) {
         return 0u;
     }
     if (rs_v3_put_u8(dst, &pos, dst_size, RS_PANEL_V3_VERSION) == 0u ||
@@ -850,6 +866,7 @@ uint16_t RsPanelV3_EncodeRsp(uint8_t *dst, uint16_t dst_size, const RsPanelV3Rsp
         rs_v3_put_u8(dst, &pos, dst_size, rsp->event.u8_a) == 0u ||
         rs_v3_put_u16le(dst, &pos, dst_size, rsp->event.u16_a) == 0u ||
         rs_v3_put_u16le(dst, &pos, dst_size, rsp->event.u16_b) == 0u ||
+        rs_v3_put_u16le(dst, &pos, dst_size, rsp->zones_crc) == 0u ||
         rs_v3_put_u16le(dst, &pos, dst_size, rsp->devices_crc) == 0u ||
         rs_v3_put_u16le(dst, &pos, dst_size, rsp->faults_crc) == 0u ||
         rs_v3_put_u8(dst, &pos, dst_size, rsp->flags) == 0u) {
@@ -876,7 +893,17 @@ uint8_t RsPanelV3_DecodeRsp(const uint8_t *src, uint16_t src_len, RsPanelV3Rsp *
         rs_v3_get_u16le(src, &pos, src_len, &out->event.u16_b) == 0u) {
         return 0u;
     }
-    if (src_len >= 14u) {
+    if (src_len >= 16u) {
+        /* zones_crc + devices_crc + faults_crc + flags */
+        if (rs_v3_get_u16le(src, &pos, src_len, &out->zones_crc) == 0u ||
+            rs_v3_get_u16le(src, &pos, src_len, &out->devices_crc) == 0u ||
+            rs_v3_get_u16le(src, &pos, src_len, &out->faults_crc) == 0u ||
+            rs_v3_get_u8(src, &pos, src_len, &out->flags) == 0u) {
+            return 0u;
+        }
+    } else if (src_len >= 14u) {
+        /* legacy: devices_crc + faults_crc + flags (без zones_crc) */
+        out->zones_crc = 0u;
         if (rs_v3_get_u16le(src, &pos, src_len, &out->devices_crc) == 0u ||
             rs_v3_get_u16le(src, &pos, src_len, &out->faults_crc) == 0u ||
             rs_v3_get_u8(src, &pos, src_len, &out->flags) == 0u) {

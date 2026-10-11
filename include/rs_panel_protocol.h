@@ -57,8 +57,11 @@ typedef enum {
     RS_PANEL_CMD_BOOT_UPD_TRANSMIT = 158u,
     RS_PANEL_CMD_BOOT_GET_VERSION    = 159u,
     RS_PANEL_RSP_POLL        = 0x81u,
-    /* Незапрошенный пакет активности (1 Гц): тип устройства в payload.dev_type. */
+    /* Ответ на ACTIVITY_REQ: тип устройства в payload.dev_type (+ UID). */
     RS_PANEL_RSP_ACTIVITY    = 0x82u,
+    /* ППКУ→панель (unicast): запрос ACTIVITY. Панель отвечает RSP_ACTIVITY.
+     * Не broadcast — на half-duplex две панели иначе TX одновременно. */
+    RS_PANEL_CMD_ACTIVITY_REQ = 0x83u,
     /* Ответ на DISCOVER: UID + текущий addr + flags (со случайной задержкой). */
     RS_PANEL_RSP_DISCOVER    = 0x84u,
     RS_PANEL_RSP_CAPS        = 0xF0u,

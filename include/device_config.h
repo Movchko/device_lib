@@ -162,10 +162,16 @@ typedef struct DeviceIgniterConfig {
 	/*Блокировка пуска */
 	uint8_t block;
 
+	/* Времена прожига, мс. Хранятся в конце, чтобы не сдвинуть поля выше.
+	 * 0 в сохранённом конфиге (старый резерв) означает значение по умолчанию:
+	 * ramp = 10, hold = 20. Диапазон команды — uint16 (0..65535). */
+	uint16_t burn_ramp_ms;
+	uint16_t burn_hold_ms;
+
 	/* резерв до полного размера VDeviceCfg::reserv (64 байта).
-	 * Для текущего порядка полей есть 1 байт выравнивания перед threshold_break_low,
-	 * поэтому используем 7 байт служебной части. */
-	uint8_t reserved[VDEVICE_CFG_SIZE - 8];
+	 * Служебная часть: disable_sc(1) + pad(1) + 2×uint16 порога + retry + block
+	 * + burn_ramp_ms + burn_hold_ms = 12 байт. */
+	uint8_t reserved[VDEVICE_CFG_SIZE - 12];
 } DeviceIgniterConfig;
 
 typedef struct DeviceRelayConfig {

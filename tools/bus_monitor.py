@@ -808,13 +808,16 @@ def _dpt_reserv_cfg(mode: int = 0, use_max: int = 1, max_c: int = 60, delay_ms: 
 
 
 def _igniter_reserv_cfg(
-    low: int = 100, high: int = 1000, retry: int = 0, disable_sc: int = 0
+    low: int = 100, high: int = 1000, retry: int = 0, disable_sc: int = 0,
+    ramp_ms: int = 10, hold_ms: int = 20,
 ) -> bytes:
     reserv = bytearray(64)
     reserv[0] = disable_sc & 0xFF
     struct.pack_into("<H", reserv, 2, low)
     struct.pack_into("<H", reserv, 4, high)
     reserv[6] = retry & 0xFF
+    struct.pack_into("<H", reserv, 8, ramp_ms)
+    struct.pack_into("<H", reserv, 10, hold_ms)
     return bytes(reserv)
 
 
@@ -1564,15 +1567,18 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
     if len(reserv) < 8:
         return ""
     parts: list[str] = []
-    if vd_type == 11:  # DeviceIgniterConfig: uint8 + pad + 2×uint16 + uint8 + uint8 block
+    if vd_type == 11:  # DeviceIgniterConfig: uint8 + pad + 2×uint16 + uint8 + uint8 + 2×uint16
         disable = reserv[0]
         th_lo = _u16_le_buf(reserv, 2)
         th_hi = _u16_le_buf(reserv, 4)
         retry = reserv[6]
         block = reserv[7] if len(reserv) > 7 else 0
+        ramp = _u16_le_buf(reserv, 8) if len(reserv) >= 10 else 0
+        hold = _u16_le_buf(reserv, 10) if len(reserv) >= 12 else 0
         parts.append(
             f"пороги={th_lo}-{th_hi}мВ retry={retry} "
-            f"КЗ_чек={'выкл' if disable else 'вкл'} блок_пуска={'да' if block else 'нет'}"
+            f"КЗ_чек={'выкл' if disable else 'вкл'} блок_пуска={'да' if block else 'нет'} "
+            f"ramp={ramp}мс hold={hold}мс"
         )
     elif vd_type == 12:  # DeviceDPTConfig
         mode = reserv[0]

@@ -46,8 +46,13 @@ class VDeviceIgniter: public VDevice {
 	uint16_t threshold_break_high;
 	uint8_t burn_retry_count;
 
-	/* внутренний счётчик времени в Run, мс */
-	uint16_t run_elapsed_ms;
+	/* времена фаз прожига, мс (из конфига, cmd=13) */
+	uint16_t burn_ramp_ms;
+	uint16_t burn_hold_ms;
+
+	/* внутренний счётчик времени в Run, мс.
+	 * uint32: сумма ramp+hold укладывается в два uint16. */
+	uint32_t run_elapsed_ms;
 	/* фаза прожига: 0=разгон, 1=удержание, 2=проверка, 3=повтор */
 	uint8_t burn_phase;
 	uint8_t burn_cycle;  /* номер цикла (0 или 1) */

@@ -52,7 +52,9 @@ extern "C" {
 
 
 
-#define RS_PANEL_V3_SYS_READY_DELAY_MS      20000u
+/* SYS_READY на ППКУ: не таймер протокола, а Warning_IsProcessDelayActive()==0
+ * (~10 с wall-time с Warning_ArmProcessDelay / старт WarningProcess +
+ * CommitFaultSnapshot). Панель только читает флаг SYS_READY из POLL. */
 
 #define RS_PANEL_V3_TIME_SYNC_PERIOD_MS     10000u
 
@@ -72,6 +74,9 @@ extern "C" {
 /* Звук: ППКУ — источник истины для панелей (POLL SYS). */
 #define RS_PANEL_V3_SYS_SOUND_ON            (1u << 6)
 #define RS_PANEL_V3_SYS_SOUND_BLOCKED       (1u << 7)
+/* WiFi значок: ON — пользователь включил (мигание до TCP); LINK — TCP хоста. */
+#define RS_PANEL_V3_SYS_WIFI_ON             (1u << 8)
+#define RS_PANEL_V3_SYS_WIFI_LINK           (1u << 9)
 
 #define RS_PANEL_V3_RSP_FLAG_NEED_CATALOG   (1u << 0)
 
@@ -86,6 +91,8 @@ extern "C" {
 #define RS_PANEL_V3_FAULT_FLAG_HAS_CAN      (1u << 3)
 
 #define RS_PANEL_V3_FAULT_FLAG_HAS_EXTRA    (1u << 4)
+
+#define RS_PANEL_V3_FAULT_FLAG_HAS_ZONE     (1u << 5)
 
 
 
@@ -475,6 +482,8 @@ typedef struct {
 
     uint8_t panel_addr;
 
+    uint8_t zone; /* 1-based; valid if RS_PANEL_V3_FAULT_FLAG_HAS_ZONE */
+
 } RsPanelV3FaultEvtItem;
 
 
@@ -543,7 +552,9 @@ typedef struct {
 
     RsPanelV3Event event;
 
-    uint16_t devices_crc;
+    uint16_t zones_crc;    /* CRC имён активных зон (ZONE_NAMES catalog) */
+
+    uint16_t devices_crc;  /* CRC карты МКУ (DEVICES catalog) */
 
     uint16_t faults_crc;
 
