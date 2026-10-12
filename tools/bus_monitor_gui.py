@@ -277,6 +277,7 @@ class BusMonitorGUI:
             "4 - пожар любой зоны",
             "5 - пуск СП своей зоны",
             "6 - пуск любой зоны",
+            "7 - неисправность любой зоны",
         )
         self.relay_mode_var = StringVar(value=self.relay_mode_options[0])
         self.zone_name_num_var = StringVar(value="1")
@@ -657,7 +658,7 @@ class BusMonitorGUI:
         self.zone_name_combo = ttk.Combobox(
             zone_name_frame,
             textvariable=self.zone_name_num_var,
-            values=[str(i) for i in range(1, 33)],
+            values=[str(i) for i in range(1, 101)],
             state="readonly",
             width=4,
         )
@@ -2437,10 +2438,10 @@ class BusMonitorGUI:
         try:
             zone_num = int(self.zone_name_num_var.get() or "0")
         except ValueError:
-            self.msg_queue.put({"log": "[!] Номер зоны: 1..32"})
+            self.msg_queue.put({"log": "[!] Номер зоны: 1..100"})
             return
-        if zone_num < 1 or zone_num > 32:
-            self.msg_queue.put({"log": "[!] Номер зоны: 1..32"})
+        if zone_num < 1 or zone_num > 100:
+            self.msg_queue.put({"log": "[!] Номер зоны: 1..100"})
             return
         try:
             h = int(self.h_adr_var.get() or "0")

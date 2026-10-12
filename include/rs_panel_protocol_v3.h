@@ -38,7 +38,8 @@ extern "C" {
 
 #define RS_PANEL_V3_MAX_FAULTS              32u
 
-#define RS_PANEL_V3_ZONE_NAME_LEN           24u
+/* Как ZONE_NAME_SIZE+1: имя зоны + суффикс « МКУ N ДПТ…» без обрезки на проводе. */
+#define RS_PANEL_V3_ZONE_NAME_LEN           65u
 
 #define RS_PANEL_V3_FAULT_TEXT_LEN          48u /* legacy text FAULT_OP — deprecated */
 
@@ -338,15 +339,20 @@ typedef struct {
 
 
 
+/* Fire snapshot в POLL: индексы + источник; имя зоны/МКУ — из каталога панели. */
 typedef struct {
 
-    uint8_t zone;
+    uint8_t zone;         /* CAN zone 1..N */
 
-    uint8_t status;
+    uint8_t status;       /* RsPanelV3ZoneStatus */
 
     uint8_t remaining_s;
 
-    char name[RS_PANEL_V3_ZONE_NAME_LEN];
+    uint8_t mcu_h_adr;    /* 0 = без суффикса МКУ; иначе номер из каталога DEVICES */
+
+    uint8_t ch_type;      /* тип канала-источника (ДПТ/СП/…); 0 = без суффикса */
+
+    uint8_t ch_l_adr;     /* l_adr канала-источника */
 
 } RsPanelV3ZoneItem;
 
@@ -490,7 +496,11 @@ typedef struct {
 
 typedef struct {
 
+    /* Ordinary EVT ACK (journal/wifi/sound/…). */
     RsPanelV3Ack ack;
+
+    /* Critical EVT ACK (START_SP/STOP/START_ALL/FIRE_RESET). */
+    RsPanelV3Ack ack_crit;
 
     RsPanelV3Sys sys;
 
@@ -550,7 +560,11 @@ typedef struct {
 
 typedef struct {
 
+    /* Ordinary inflight EVT (journal/wifi/sound/…). */
     RsPanelV3Event event;
+
+    /* Critical inflight EVT (START_SP/STOP/START_ALL/FIRE_RESET). */
+    RsPanelV3Event event_crit;
 
     uint16_t zones_crc;    /* CRC имён активных зон (ZONE_NAMES catalog) */
 

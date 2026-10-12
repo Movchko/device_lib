@@ -14,7 +14,7 @@
 | UI / навигация | — | полная |
 | LED / звук | только состояния | правила ППКУ1 + локальные кнопки |
 | Hold кнопок | — | локально; вверх — факт/запрос |
-| Решение | валидирует события, ACK | одно событие до ACK |
+| Решение | валидирует события, ACK | два слота EVT (ordinary+critical) до ACK |
 
 ППКУ **не** шлёт частоты мигания / hold-sound profile (`CMD_LED` blink timing / `CMD_SOUND` hold устаревают для этих сценариев).
 
@@ -37,12 +37,13 @@ sequenceDiagram
 
 Опрос — с максимальной частотой RS485, master-only.
 
-### 2.1. Семантика одного события
+### 2.1. Две очереди EVT (ordinary + critical)
 
-1. Панель занимает слот (`seq != 0`).
-2. Пока нет ACK с тем же `seq` — событие повторяется в каждом RSP.
-3. ACK с любым result освобождает слот.
-4. Одновременно **строго одно** событие на панель.
+1. Панель держит **два независимых inflight-слота**: ordinary (журнал/wifi/sound/…) и critical (`START_SP` / `STOP_LAUNCH` / `START_ALL_COMMIT` / `FIRE_RESET`).
+2. RSP несёт оба слота; взаимного вытеснения между очередями нет.
+3. ППКУ обрабатывает сначала ordinary, затем critical; в POLL при любом pending ACK — **ровно два** TLV `ACK` (1-й = ordinary, 2-й = critical; пустой слот: `seq=0`, `result=NONE`). Один TLV нельзя — декодер принял бы его за ordinary.
+4. Пока нет ACK с тем же `seq` для своей полосы — слот повторяется в каждом RSP.
+5. ACK с любым result освобождает **только** свою полосу.
 
 ---
 
@@ -117,19 +118,17 @@ CRC в RSP (раздельные проверки):
 
 ```
 ver u8 = 0x03
-event.seq u8      /* 0 = нет события */
-event.type u8
-event.zone u8
-event.u8_a u8
-event.u16_a u16le
-event.u16_b u16le
+event.seq/type/zone/u8_a/u16_a/u16_b     /* ordinary lane; seq=0 = пусто */
+event_crit.seq/type/zone/u8_a/u16_a/u16_b /* critical lane; seq=0 = пусто */
 zones_crc u16le
 devices_crc u16le
 faults_crc u16le
 flags u8   /* bit0 NEED_CATALOG — нет валидного каталога (не частичный CRC) */
 ```
 
-Минимальная длина RSP v3 с раздельными CRC = **16** байт payload. Старые 14-байтные RSP (без `zones_crc`) декодируются как legacy: `zones_crc=0` → ППКУ перепишет зоны.
+Длина dual-lane RSP = **24** байт payload. Кадры 16 байт (один event + CRC) декодируются как legacy: `event_crit` пустой. Старые 14-байтные RSP (без `zones_crc`) — `zones_crc=0` → ППКУ перепишет зоны.
+
+Critical EVT: `START_ALL_COMMIT`, `START_SP`, `STOP_LAUNCH`, `FIRE_RESET`. Остальные — ordinary.
 
 ### Типы событий панели
 

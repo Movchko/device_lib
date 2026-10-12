@@ -394,12 +394,34 @@ uint16_t RsPanelV3_EncodePoll(uint8_t *dst, uint16_t dst_size, const RsPanelV3Po
         return 0u;
     }
 
-    if (poll->ack.result != (uint8_t)RS_PANEL_V3_ACK_NONE) {
-        if (rs_v3_put_u8(dst, &pos, dst_size, (uint8_t)RS_PANEL_V3_TAG_ACK) == 0u ||
-            rs_v3_put_u8(dst, &pos, dst_size, 2u) == 0u ||
-            rs_v3_put_u8(dst, &pos, dst_size, poll->ack.seq) == 0u ||
-            rs_v3_put_u8(dst, &pos, dst_size, poll->ack.result) == 0u) {
-            return 0u;
+    /* Два TAG_ACK: [0]=ordinary, [1]=critical.
+     * Если уходит только critical, один TLV декодировался бы как ordinary —
+     * START_SP/STOP никогда не получали ACK. При любом pending шлём пару
+     * (пустой слот: seq=0, result=NONE). */
+    {
+        const uint8_t have_ord =
+            (poll->ack.result != (uint8_t)RS_PANEL_V3_ACK_NONE &&
+             poll->ack.seq != 0u) ? 1u : 0u;
+        const uint8_t have_crit =
+            (poll->ack_crit.result != (uint8_t)RS_PANEL_V3_ACK_NONE &&
+             poll->ack_crit.seq != 0u) ? 1u : 0u;
+        if (have_ord != 0u || have_crit != 0u) {
+            const uint8_t o_seq = (have_ord != 0u) ? poll->ack.seq : 0u;
+            const uint8_t o_res = (have_ord != 0u) ? poll->ack.result
+                                                   : (uint8_t)RS_PANEL_V3_ACK_NONE;
+            const uint8_t c_seq = (have_crit != 0u) ? poll->ack_crit.seq : 0u;
+            const uint8_t c_res = (have_crit != 0u) ? poll->ack_crit.result
+                                                    : (uint8_t)RS_PANEL_V3_ACK_NONE;
+            if (rs_v3_put_u8(dst, &pos, dst_size, (uint8_t)RS_PANEL_V3_TAG_ACK) == 0u ||
+                rs_v3_put_u8(dst, &pos, dst_size, 2u) == 0u ||
+                rs_v3_put_u8(dst, &pos, dst_size, o_seq) == 0u ||
+                rs_v3_put_u8(dst, &pos, dst_size, o_res) == 0u ||
+                rs_v3_put_u8(dst, &pos, dst_size, (uint8_t)RS_PANEL_V3_TAG_ACK) == 0u ||
+                rs_v3_put_u8(dst, &pos, dst_size, 2u) == 0u ||
+                rs_v3_put_u8(dst, &pos, dst_size, c_seq) == 0u ||
+                rs_v3_put_u8(dst, &pos, dst_size, c_res) == 0u) {
+                return 0u;
+            }
         }
     }
 
@@ -444,15 +466,12 @@ uint16_t RsPanelV3_EncodePoll(uint8_t *dst, uint16_t dst_size, const RsPanelV3Po
         }
         for (i = 0u; i < n; i++) {
             const RsPanelV3ZoneItem *z = &poll->zones.items[i];
-            uint8_t name_len = 0u;
-            while (name_len < (RS_PANEL_V3_ZONE_NAME_LEN - 1u) && z->name[name_len] != '\0') {
-                name_len++;
-            }
             if (rs_v3_put_u8(dst, &pos, dst_size, z->zone) == 0u ||
                 rs_v3_put_u8(dst, &pos, dst_size, z->status) == 0u ||
                 rs_v3_put_u8(dst, &pos, dst_size, z->remaining_s) == 0u ||
-                rs_v3_put_u8(dst, &pos, dst_size, name_len) == 0u ||
-                rs_v3_put_bytes(dst, &pos, dst_size, z->name, name_len) == 0u) {
+                rs_v3_put_u8(dst, &pos, dst_size, z->mcu_h_adr) == 0u ||
+                rs_v3_put_u8(dst, &pos, dst_size, z->ch_type) == 0u ||
+                rs_v3_put_u8(dst, &pos, dst_size, z->ch_l_adr) == 0u) {
                 return 0u;
             }
         }
@@ -488,7 +507,6 @@ uint16_t RsPanelV3_EncodePoll(uint8_t *dst, uint16_t dst_size, const RsPanelV3Po
     if (poll->has_devices != 0u) {
         const RsPanelV3DeviceItem *d = &poll->device;
         uint8_t i;
-        uint8_t body_len;
         if (d->op == (uint8_t)RS_PANEL_V3_STREAM_OP_CLEAR) {
             if (rs_v3_put_u8(dst, &pos, dst_size, (uint8_t)RS_PANEL_V3_TAG_DEVICES) == 0u ||
                 rs_v3_put_u8(dst, &pos, dst_size, 1u) == 0u ||
@@ -496,9 +514,15 @@ uint16_t RsPanelV3_EncodePoll(uint8_t *dst, uint16_t dst_size, const RsPanelV3Po
                 return 0u;
             }
         } else {
-            body_len = (uint8_t)(15u + d->n_ch * 2u);
-            if (rs_v3_put_u8(dst, &pos, dst_size, (uint8_t)RS_PANEL_V3_TAG_DEVICES) == 0u ||
-                rs_v3_put_u8(dst, &pos, dst_size, body_len) == 0u ||
+            /* body: op,d_type,h,l,zone,uid0..2,n_ch + n_ch×(ch_type,ch_l_adr)
+             * = 18 + n_ch*2. Длину считаем после записи — без magic-числа. */
+            uint16_t body_pos;
+            uint16_t bl;
+            if (rs_v3_put_u8(dst, &pos, dst_size, (uint8_t)RS_PANEL_V3_TAG_DEVICES) == 0u) {
+                return 0u;
+            }
+            body_pos = pos;
+            if (rs_v3_put_u8(dst, &pos, dst_size, 0u) == 0u ||
                 rs_v3_put_u8(dst, &pos, dst_size, d->op) == 0u ||
                 rs_v3_put_u8(dst, &pos, dst_size, d->d_type) == 0u ||
                 rs_v3_put_u8(dst, &pos, dst_size, d->h_adr) == 0u ||
@@ -516,6 +540,11 @@ uint16_t RsPanelV3_EncodePoll(uint8_t *dst, uint16_t dst_size, const RsPanelV3Po
                     return 0u;
                 }
             }
+            bl = (uint16_t)(pos - body_pos - 1u);
+            if (bl > 255u) {
+                return 0u;
+            }
+            dst[body_pos] = (uint8_t)bl;
         }
     }
 
@@ -623,6 +652,7 @@ uint8_t RsPanelV3_DecodePoll(const uint8_t *src, uint16_t src_len, RsPanelV3Poll
     uint16_t len_u16;
     uint16_t body_start;
     uint16_t body_end;
+    uint8_t ack_n = 0u;
     if (src == 0 || out == 0 || src_len < 1u) {
         return 0u;
     }
@@ -657,9 +687,17 @@ uint8_t RsPanelV3_DecodePoll(const uint8_t *src, uint16_t src_len, RsPanelV3Poll
 
         switch (tag) {
         case (uint8_t)RS_PANEL_V3_TAG_ACK:
+            /* 1-й ACK = ordinary, 2-й = critical; лишние игнор. */
             if ((uint16_t)(body_end - body_start) >= 2u) {
-                out->ack.seq = src[body_start];
-                out->ack.result = src[body_start + 1u];
+                if (ack_n == 0u) {
+                    out->ack.seq = src[body_start];
+                    out->ack.result = src[body_start + 1u];
+                    ack_n = 1u;
+                } else if (ack_n == 1u) {
+                    out->ack_crit.seq = src[body_start];
+                    out->ack_crit.result = src[body_start + 1u];
+                    ack_n = 2u;
+                }
             }
             break;
         case (uint8_t)RS_PANEL_V3_TAG_SYS:
@@ -692,24 +730,13 @@ uint8_t RsPanelV3_DecodePoll(const uint8_t *src, uint16_t src_len, RsPanelV3Poll
             out->zones.count = n;
             for (i = 0u; i < n; i++) {
                 RsPanelV3ZoneItem *z = &out->zones.items[i];
-                uint8_t name_len;
                 if (rs_v3_get_u8(src, &zp, body_end, &z->zone) == 0u ||
                     rs_v3_get_u8(src, &zp, body_end, &z->status) == 0u ||
                     rs_v3_get_u8(src, &zp, body_end, &z->remaining_s) == 0u ||
-                    rs_v3_get_u8(src, &zp, body_end, &name_len) == 0u) {
+                    rs_v3_get_u8(src, &zp, body_end, &z->mcu_h_adr) == 0u ||
+                    rs_v3_get_u8(src, &zp, body_end, &z->ch_type) == 0u ||
+                    rs_v3_get_u8(src, &zp, body_end, &z->ch_l_adr) == 0u) {
                     return 0u;
-                }
-                memset(z->name, 0, sizeof(z->name));
-                if (name_len > 0u) {
-                    uint16_t copy = name_len;
-                    if (copy >= RS_PANEL_V3_ZONE_NAME_LEN) {
-                        copy = (uint16_t)(RS_PANEL_V3_ZONE_NAME_LEN - 1u);
-                    }
-                    if ((uint16_t)(zp + copy) > body_end) {
-                        return 0u;
-                    }
-                    memcpy(z->name, &src[zp], copy);
-                    zp = (uint16_t)(zp + name_len);
                 }
             }
             break;
@@ -855,8 +882,8 @@ uint8_t RsPanelV3_DecodePoll(const uint8_t *src, uint16_t src_len, RsPanelV3Poll
 uint16_t RsPanelV3_EncodeRsp(uint8_t *dst, uint16_t dst_size, const RsPanelV3Rsp *rsp)
 {
     uint16_t pos = 0u;
-    /* ver + event(8) + zones_crc + devices_crc + faults_crc + flags = 16 */
-    if (dst == 0 || rsp == 0 || dst_size < 16u) {
+    /* ver + event(8) + event_crit(8) + zones_crc + devices_crc + faults_crc + flags = 24 */
+    if (dst == 0 || rsp == 0 || dst_size < 24u) {
         return 0u;
     }
     if (rs_v3_put_u8(dst, &pos, dst_size, RS_PANEL_V3_VERSION) == 0u ||
@@ -866,6 +893,12 @@ uint16_t RsPanelV3_EncodeRsp(uint8_t *dst, uint16_t dst_size, const RsPanelV3Rsp
         rs_v3_put_u8(dst, &pos, dst_size, rsp->event.u8_a) == 0u ||
         rs_v3_put_u16le(dst, &pos, dst_size, rsp->event.u16_a) == 0u ||
         rs_v3_put_u16le(dst, &pos, dst_size, rsp->event.u16_b) == 0u ||
+        rs_v3_put_u8(dst, &pos, dst_size, rsp->event_crit.seq) == 0u ||
+        rs_v3_put_u8(dst, &pos, dst_size, rsp->event_crit.type) == 0u ||
+        rs_v3_put_u8(dst, &pos, dst_size, rsp->event_crit.zone) == 0u ||
+        rs_v3_put_u8(dst, &pos, dst_size, rsp->event_crit.u8_a) == 0u ||
+        rs_v3_put_u16le(dst, &pos, dst_size, rsp->event_crit.u16_a) == 0u ||
+        rs_v3_put_u16le(dst, &pos, dst_size, rsp->event_crit.u16_b) == 0u ||
         rs_v3_put_u16le(dst, &pos, dst_size, rsp->zones_crc) == 0u ||
         rs_v3_put_u16le(dst, &pos, dst_size, rsp->devices_crc) == 0u ||
         rs_v3_put_u16le(dst, &pos, dst_size, rsp->faults_crc) == 0u ||
@@ -893,8 +926,22 @@ uint8_t RsPanelV3_DecodeRsp(const uint8_t *src, uint16_t src_len, RsPanelV3Rsp *
         rs_v3_get_u16le(src, &pos, src_len, &out->event.u16_b) == 0u) {
         return 0u;
     }
-    if (src_len >= 16u) {
-        /* zones_crc + devices_crc + faults_crc + flags */
+    if (src_len >= 24u) {
+        /* Dual-lane: event_crit(8) + crcs + flags */
+        if (rs_v3_get_u8(src, &pos, src_len, &out->event_crit.seq) == 0u ||
+            rs_v3_get_u8(src, &pos, src_len, &out->event_crit.type) == 0u ||
+            rs_v3_get_u8(src, &pos, src_len, &out->event_crit.zone) == 0u ||
+            rs_v3_get_u8(src, &pos, src_len, &out->event_crit.u8_a) == 0u ||
+            rs_v3_get_u16le(src, &pos, src_len, &out->event_crit.u16_a) == 0u ||
+            rs_v3_get_u16le(src, &pos, src_len, &out->event_crit.u16_b) == 0u ||
+            rs_v3_get_u16le(src, &pos, src_len, &out->zones_crc) == 0u ||
+            rs_v3_get_u16le(src, &pos, src_len, &out->devices_crc) == 0u ||
+            rs_v3_get_u16le(src, &pos, src_len, &out->faults_crc) == 0u ||
+            rs_v3_get_u8(src, &pos, src_len, &out->flags) == 0u) {
+            return 0u;
+        }
+    } else if (src_len >= 16u) {
+        /* Legacy single-event RSP: event_crit остаётся NONE */
         if (rs_v3_get_u16le(src, &pos, src_len, &out->zones_crc) == 0u ||
             rs_v3_get_u16le(src, &pos, src_len, &out->devices_crc) == 0u ||
             rs_v3_get_u16le(src, &pos, src_len, &out->faults_crc) == 0u ||
@@ -902,7 +949,6 @@ uint8_t RsPanelV3_DecodeRsp(const uint8_t *src, uint16_t src_len, RsPanelV3Rsp *
             return 0u;
         }
     } else if (src_len >= 14u) {
-        /* legacy: devices_crc + faults_crc + flags (без zones_crc) */
         out->zones_crc = 0u;
         if (rs_v3_get_u16le(src, &pos, src_len, &out->devices_crc) == 0u ||
             rs_v3_get_u16le(src, &pos, src_len, &out->faults_crc) == 0u ||
@@ -910,7 +956,6 @@ uint8_t RsPanelV3_DecodeRsp(const uint8_t *src, uint16_t src_len, RsPanelV3Rsp *
             return 0u;
         }
     } else if (src_len >= 12u) {
-        /* legacy RSP: single fault_crc */
         uint16_t legacy_crc;
         if (rs_v3_get_u16le(src, &pos, src_len, &legacy_crc) == 0u) {
             return 0u;

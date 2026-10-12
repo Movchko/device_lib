@@ -54,6 +54,8 @@ DEVICE_NAMES = {
     15: "Кнопка",
     16: "Концевик",
     30: "Панель",
+    31: "Панель boot",
+    32: "БП",
 }
 
 # Сервисные команды
@@ -626,14 +628,15 @@ MKU_OLD_MAX_SLOTS = 16
 MKU_TOTAL_WORDS = MKU_STRIDE_BYTES // 4  # 601 слов на один MKUCfg (new)
 MKU_POST_UID_WORDS = (MKU_STRIDE_BYTES - MKU_UID_BYTES) // 4  # 593 слова после UId
 
-# Слоты виртуальных устройств по типу платы МКУ (device.hpp)
+# Порядок слотов DefaultConfig прошивок МКУ (VDtype[0..]).
+# K1: ДПТ, спичка, спичка. K3: кнопка, концевик, спичка.
 MCU_HARDWARE_SLOTS: dict[int, list[int]] = {
     13: [11, 12],         # МКУ_IGN
     14: [12],             # МКУ_TC
-    20: [11, 11, 12],     # МКУ_K1: 2 спички + ДПТ
-    21: [11, 11, 11],     # МКУ_K2: 3 спички
-    22: [16, 16, 11],     # МКУ_K3: 2 концевика + спичка
-    23: [17, 17],         # МКУ_KR: 2 реле
+    20: [12, 11, 11],     # МКУ_K1
+    21: [11, 11, 11],     # МКУ_K2
+    22: [15, 16, 11],     # МКУ_K3
+    23: [17, 17],         # МКУ_KR
 }
 
 
@@ -751,26 +754,26 @@ def _mku_vdtype(cfg: bytes, mku_off: int, slot: int) -> int:
 
 
 def iter_mku_virtual_devices(
-    cfg: bytes, mku_off: int, mku_stride: int, mku_board_type: int, layout: str
+    cfg: bytes, mku_off: int, mku_stride: int, _mku_board_type: int, layout: str
 ) -> list[tuple[int, int, bytes]]:
-    """Список (slot, vd_type, reserv64) для одного MKUCfg."""
+    """Список (slot, vd_type, reserv64) для одного MKUCfg.
+
+    Тип канала берётся только из VDtype[slot]. Ноль — канал выключен, шаблон платы
+    его не подставляет.
+    """
     out: list[tuple[int, int, bytes]] = []
-    hw = MCU_HARDWARE_SLOTS.get(mku_board_type, [])
 
     if layout == "new":
-        slot_count = len(hw) if hw else NUM_DEV_IN_MCU_CFG
-        for j in range(slot_count):
+        # VDtype[slot]==0 — канал выключен (прошивки МКУ). Шаблон платы тип не подменяет.
+        # Слоты за пределами «штатных» 2–3 тоже показываем, если тип задан.
+        for j in range(NUM_DEV_IN_MCU_CFG):
             reserv_off = mku_off + MKU_DEVICES0_OFF + j * 64
             if reserv_off + 64 > len(cfg):
                 break
-            reserv = cfg[reserv_off : reserv_off + 64]
             vd_type = _mku_vdtype(cfg, mku_off, j)
-            if not vd_type and j < len(hw):
-                vd_type = hw[j]
-            if not vd_type and not _reserv_has_data(reserv):
-                continue
             if not vd_type:
                 continue
+            reserv = cfg[reserv_off : reserv_off + 64]
             out.append((j, vd_type, reserv))
         return out
 
@@ -1514,6 +1517,9 @@ DEVICE_NAMES_CFG = {
     23: "МКУ_KR",
     15: "Кнопка",
     16: "Концевик",
+    30: "Панель",
+    31: "Панель boot",
+    32: "БП",
 }
 
 
@@ -1540,19 +1546,41 @@ def _u32_le_buf(b: bytes, off: int) -> int:
     return struct.unpack_from("<I", b, off)[0]
 
 
+def _named(names: tuple[str, ...] | dict[int, str], value: int) -> str:
+    if isinstance(names, dict):
+        return names.get(value, str(value))
+    return names[value] if 0 <= value < len(names) else str(value)
+
+
+def _stored_or_default(stored: int, effective: int, unit: str = "") -> str:
+    """Показать байт из Flash и значение, которое берёт прошивка, если 0 = умолчание."""
+    if stored == effective:
+        return f"{stored}{unit}"
+    return f"{stored}→{effective}{unit}"
+
+
 def _button_kind_name(kind: int) -> str:
-    names = (
-        "ПУСК СП",
-        "пуск всех зон",
-        "пуск по списку зон",
-        "пожар всех зон",
-        "пожар по списку зон",
+    return _named(
+        (
+            "ПУСК СП",
+            "пуск всех зон",
+            "пуск по списку зон",
+            "пожар всех зон",
+            "пожар по списку зон",
+        ),
+        kind,
     )
-    return names[kind] if 0 <= kind < len(names) else str(kind)
+
+
+def _dpt_mode_name(mode: int) -> str:
+    """DeviceDPTMode: 0 ДПТ, 1 концевик, 2 кнопка."""
+    return _named(("ДПТ", "концевик", "кнопка"), mode)
 
 
 def _lswitch_function_name(func: int) -> str:
+    """0 в конфиге прошивка не принимает: остаётся SetFault (1)."""
     names = {
+        0: "0→неисправность",
         1: "неисправность",
         2: "ручной ППКУ",
         3: "авто ППКУ",
@@ -1560,6 +1588,23 @@ def _lswitch_function_name(func: int) -> str:
         5: "открытие",
     }
     return names.get(func, str(func))
+
+
+def _relay_mode_name(mode: int) -> str:
+    """DeviceRelayConfig.mode, device_config.h (0..7)."""
+    return _named(
+        (
+            "нет авто",
+            "пожар своей зоны",
+            "неисправность своей зоны",
+            "концевик своей зоны",
+            "пожар любой зоны",
+            "пуск СП своей зоны",
+            "пуск любой зоны",
+            "неисправность любой зоны",
+        ),
+        mode,
+    )
 
 
 def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
@@ -1575,36 +1620,42 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
         block = reserv[7] if len(reserv) > 7 else 0
         ramp = _u16_le_buf(reserv, 8) if len(reserv) >= 10 else 0
         hold = _u16_le_buf(reserv, 10) if len(reserv) >= 12 else 0
+        # device_igniter.cpp Init: 0 порога → 1000/3000 (оба нуля ещё и retry=1),
+        # 0 ramp/hold → 10/20 мс.
+        eff_lo = th_lo if th_lo else 1000
+        eff_hi = th_hi if th_hi else 3000
+        eff_retry = 1 if (th_lo == 0 and th_hi == 0) else retry
+        eff_ramp = ramp if ramp else 10
+        eff_hold = hold if hold else 20
         parts.append(
-            f"пороги={th_lo}-{th_hi}мВ retry={retry} "
+            f"пороги={_stored_or_default(th_lo, eff_lo)}-{_stored_or_default(th_hi, eff_hi)}мВ "
+            f"retry={_stored_or_default(retry, eff_retry)} "
             f"КЗ_чек={'выкл' if disable else 'вкл'} блок_пуска={'да' if block else 'нет'} "
-            f"ramp={ramp}мс hold={hold}мс"
+            f"ramp={_stored_or_default(ramp, eff_ramp, 'мс')} "
+            f"hold={_stored_or_default(hold, eff_hold, 'мс')}"
         )
     elif vd_type == 12:  # DeviceDPTConfig
         mode = reserv[0]
         use_max = reserv[1]
         th = _u16_le_buf(reserv, 2)
         dms = _u16_le_buf(reserv, 4)
-        parts.append(f"режим={mode} MAX={'да' if use_max else 'нет'} T_пож={th}°C стаб={dms}мс")
-    elif vd_type == 17:  # DeviceRelayConfig
+        parts.append(
+            f"режим={mode}({_dpt_mode_name(mode)}) "
+            f"MAX={'да' if use_max else 'нет'} T_пож={th}°C стаб={dms}мс"
+        )
+    elif vd_type == 17:  # DeviceRelayConfig; settle 0 → 100 мс (device_relay.cpp Init)
         settle = _u16_le_buf(reserv, 4)
         mode = reserv[6] if len(reserv) > 6 else 0
-        mode_names = (
-            "нет авто",
-            "пожар своей зоны",
-            "неисправность своей зоны",
-            "концевик своей зоны",
-            "пожар любой зоны",
-            "пуск СП своей зоны",
-            "пуск любой зоны",
-        )
-        mode_s = mode_names[mode] if mode < len(mode_names) else str(mode)
         saved = reserv[7] if len(reserv) > 7 else 0
         parts.append(
             f"init={reserv[0]} persist={reserv[1]} inv_ОС={reserv[2]} "
-            f"задержка_перекл={reserv[3]}с ожид_ОС={settle}мс mode={mode}({mode_s}) saved={saved}"
+            f"задержка_перекл={reserv[3]}с ожид_ОС={_stored_or_default(settle, settle or 100, 'мс')} "
+            f"mode={mode}({_relay_mode_name(mode)}) saved={saved}"
         )
     elif vd_type == 15:  # DeviceButtonConfig (голова DPT + button_kind/zones/NC)
+        mode = reserv[0]
+        use_max = reserv[1]
+        th = _u16_le_buf(reserv, 2)
         dms = _u16_le_buf(reserv, 4)
         kind = reserv[6] if len(reserv) > 6 else 0
         zones = list(reserv[7:14]) if len(reserv) >= 14 else []
@@ -1612,10 +1663,13 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
         zones_nz = [z for z in zones if z != 0]
         zones_s = ",".join(str(z) for z in zones_nz) if zones_nz else "—"
         parts.append(
+            f"режим={mode}({_dpt_mode_name(mode)}) "
+            f"MAX={'да' if use_max else 'нет'} T_пож={th}°C "
             f"kind={kind}({_button_kind_name(kind)}) зоны=[{zones_s}] "
             f"{'NC' if nc else 'NO'} стаб={dms}мс"
         )
     elif vd_type == 16:  # DeviceLimitSwitchConfig
+        mode = reserv[0]
         use_max = reserv[1]
         th = _u16_le_buf(reserv, 2)
         dms = _u16_le_buf(reserv, 4)
@@ -1623,9 +1677,25 @@ def _device_cfg_extras(vd_type: int, reserv: bytes) -> str:
         func = reserv[7]
         nc = reserv[8]
         parts.append(
+            f"режим={mode}({_dpt_mode_name(mode)}) "
             f"MAX={'да' if use_max else 'нет'} T={th}°C стаб={dms}мс "
             f"trig={trig}с func={func}({_lswitch_function_name(func)}) "
             f"{'NC' if nc else 'NO'}"
+        )
+    elif vd_type == 30 and len(reserv) >= 21:  # DevicePanelConfig
+        led = _u16_le_buf(reserv, 4)
+        uid0 = _u32_le_buf(reserv, 8)
+        uid1 = _u32_le_buf(reserv, 12)
+        uid2 = _u32_le_buf(reserv, 16)
+        ptype = reserv[20]
+        # PANEL_TYPE_NORMALIZE: 0 хранится как «не задан» и работает как тип 2.
+        pnames = {0: "0→тип2/малая-H", 1: "тип1/большая", 2: "тип2/малая-H", 3: "тип3/малая-V"}
+        parts.append(
+            f"rs={reserv[0]} ориент={'верт' if reserv[1] else 'гориз'} журнал={reserv[2]} "
+            f"btn=0x{reserv[3]:02X} led=0x{led:04X} "
+            f"роль={'primary' if reserv[6] else 'normal'} assigned={reserv[7]} "
+            f"uid={uid0:08X}:{uid1:08X}:{uid2:08X} "
+            f"panel_type={ptype}({pnames.get(ptype, str(ptype))})"
         )
     elif vd_type != 0 and any(reserv[:16]):
         hx = reserv[:8].hex()
@@ -1715,7 +1785,7 @@ def parse_config_display(
         d_type = cfg[off + 23]
         uid_empty = all(cfg[off + k] == 0 for k in range(32))
         if uid_empty:
-            break
+            continue
 
         d_name = _device_name(d_type)
         header = f"CfgDevices[{i}]: {d_name} h={h_adr} l={l_adr} z={zone}"
@@ -1729,7 +1799,7 @@ def parse_config_display(
                 if off + MKU_MODULE_DELAY_OFF + j * 4 + 4 <= len(cfg):
                     md_j = _u32_le_buf(cfg, off + MKU_MODULE_DELAY_OFF + j * 4)
                     mod_delays.append(f"сл.{j}:{md_j}с")
-            md_part = f" zone_delay={zd}с" if zd else ""
+            md_part = f" zone_delay={zd}с"
             if mod_delays:
                 md_part += f" module_delay={','.join(mod_delays)}"
             header += md_part
@@ -1748,14 +1818,14 @@ def parse_config_display(
         name_bytes = cfg[off : off + ZONE_NAME_SIZE_CFG]
         name = name_bytes.split(b"\x00")[0].decode("utf-8", errors="replace").strip()
         if not name:
-            break
+            continue
         lines.append(f"зона {z + 1}: {name!r}")
 
     # fire_and[ZONE_NUMBER] + beep_block + wifi_block
     fire_off = fire_and_offset
     if fire_off + FIRE_AND_BYTES_CFG <= len(cfg):
         fire_and = cfg[fire_off : fire_off + FIRE_AND_BYTES_CFG]
-        and_zones = [str(zi) for zi, v in enumerate(fire_and) if v != 0]
+        and_zones = [str(zi + 1) for zi, v in enumerate(fire_and) if v != 0]
         if and_zones:
             preview = ", ".join(and_zones[:40])
             more = f" …(+{len(and_zones) - 40})" if len(and_zones) > 40 else ""
